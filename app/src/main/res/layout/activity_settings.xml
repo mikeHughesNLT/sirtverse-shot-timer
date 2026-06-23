@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/settings"
+            android:textColor="@color/on_surface"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="20dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Start delay min (ms)"
+            android:textColor="@color/muted" />
+        <EditText
+            android:id="@+id/editDelayMin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:textColor="@color/on_surface"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Start delay max (ms)"
+            android:textColor="@color/muted" />
+        <EditText
+            android:id="@+id/editDelayMax"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:textColor="@color/on_surface"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Laser color"
+            android:textColor="@color/muted" />
+        <RadioGroup
+            android:id="@+id/radioColor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+            <RadioButton android:id="@+id/colorRed"   android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Red"   android:textColor="@color/on_surface" />
+            <RadioButton android:id="@+id/colorGreen" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Green" android:textColor="@color/on_surface" android:layout_marginStart="16dp" />
+            <RadioButton android:id="@+id/colorBoth"  android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Both"  android:textColor="@color/on_surface" android:layout_marginStart="16dp" />
+        </RadioGroup>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Cooldown / debounce (ms)"
+            android:textColor="@color/muted" />
+        <EditText
+            android:id="@+id/editCooldown"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:textColor="@color/on_surface"
+            android:layout_marginBottom="16dp" />
+
+        <CheckBox
+            android:id="@+id/checkSound"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Start beep / sound"
+            android:textColor="@color/on_surface"
+            android:layout_marginBottom="24dp" />
+
+        <Button
+            android:id="@+id/btnSaveSettings"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="Save Settings"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="@color/accent_green" />
+    </LinearLayout>
+</ScrollView>
