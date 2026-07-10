@@ -44,6 +44,31 @@ Room buys querying/migrations we don't need yet.
 
 **Revisit when:** history needs real querying/filtering or grows large.
 
+## D-006 — CameraX (PreviewView + ImageAnalysis), not raw Camera2
+**Date:** 2026-07-09 · **Status:** Accepted · **Brief:** CC-SIRT-TIMER-M2-CAMERA-001
+
+The old `sirtverse-android` MJPEG pipeline used Camera2 with AE locked to darkness so
+the laser was the only bright spot. That approach is clean-room-avoid (Product Strategy
+call #7): it prevents seeing the shooter and can't support MediaPipe pose.
+
+CameraX is the correct M2 foundation for three reasons:
+
+1. **ImageAnalysis seam.** `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` gives M3's
+   `CameraLaserDetector` a guaranteed frame stream without writing any Camera2
+   `ImageReader` boilerplate. The frame tap in M2 proves this seam works at ≥15 fps
+   on the X4000 before any detection logic exists.
+
+2. **Exposure stays variable.** CameraX auto-exposure is the default; `Camera2Interop`
+   is available for targeted M3 experiments without locking the architecture into
+   darkness-mode. Exposure is something to tune per-scene, not to hardwire.
+
+3. **Lifecycle management.** `bindToLifecycle` tears down the camera automatically on
+   Activity destroy/pause — no `CameraDevice.StateCallback` boilerplate, no surface
+   leak risk.
+
+**Trade-off accepted:** Camera2Interop (for M3 exposure experiments) is accessed via
+`androidx.camera.camera2.interop.Camera2Interop`, not via raw Camera2 APIs.
+
 ## D-005 — Engine owns state, UI owns the clock
 **Date:** 2026-06-23 · **Status:** Accepted
 

@@ -1,86 +1,121 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+    M2 layout: FrameLayout stacks three layers:
+      1. PreviewView  — back-camera live feed (background; bg=@color/bg = M1 dark when camera off)
+      2. cameraScrim  — dark overlay for text readability; visible only when camera is active
+      3. LinearLayout — existing timer UI overlay; unchanged widget IDs and logic
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="20dp"
     android:background="@color/bg">
 
-    <!-- Big status line: standby / "Get ready…" / "GO!" -->
-    <TextView
-        android:id="@+id/txtStatus"
+    <!-- Layer 1: live preview (or dark bg when permission denied) -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center"
-        android:text="@string/standby"
-        android:textColor="@color/muted"
-        android:textSize="22sp"
-        android:layout_marginBottom="8dp" />
+        android:layout_height="match_parent" />
 
-    <!-- First-shot / elapsed headline -->
-    <TextView
-        android:id="@+id/txtFirstShot"
+    <!-- Layer 2: scrim — shown when camera is active so timer text stays readable -->
+    <View
+        android:id="@+id/cameraScrim"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center"
-        android:text="—"
-        android:textColor="@color/accent_green"
-        android:textSize="56sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="4dp" />
+        android:layout_height="match_parent"
+        android:background="#88000000"
+        android:visibility="gone" />
 
-    <TextView
+    <!-- Layer 3: timer UI (identical widget IDs to M1 — no activity-logic changes) -->
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center"
-        android:text="first-shot time"
-        android:textColor="@color/muted"
-        android:textSize="13sp"
-        android:layout_marginBottom="16dp" />
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="20dp">
 
-    <!-- Live shot/split list -->
-    <ScrollView
-        android:id="@+id/scrollShots"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:background="@color/surface"
-        android:padding="12dp">
-
-        <LinearLayout
-            android:id="@+id/listShots"
+        <!-- Camera-off notice (visible only when permission is denied) -->
+        <TextView
+            android:id="@+id/txtCameraOff"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical" />
-    </ScrollView>
+            android:gravity="center"
+            android:text="camera off — timer still works"
+            android:textColor="@color/muted"
+            android:textSize="12sp"
+            android:visibility="gone"
+            android:layout_marginBottom="4dp" />
 
-    <Button
-        android:id="@+id/btnStart"
-        android:layout_width="match_parent"
-        android:layout_height="60dp"
-        android:text="@string/start"
-        android:textColor="#FFFFFF"
-        android:backgroundTint="@color/accent_green"
-        android:layout_marginTop="16dp" />
+        <TextView
+            android:id="@+id/txtStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="@string/standby"
+            android:textColor="@color/muted"
+            android:textSize="22sp"
+            android:layout_marginBottom="8dp" />
 
-    <Button
-        android:id="@+id/btnSimulateHit"
-        android:layout_width="match_parent"
-        android:layout_height="72dp"
-        android:text="@string/simulate_hit"
-        android:textSize="18sp"
-        android:textColor="#FFFFFF"
-        android:backgroundTint="@color/amber"
-        android:enabled="false"
-        android:layout_marginTop="12dp" />
+        <TextView
+            android:id="@+id/txtFirstShot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="—"
+            android:textColor="@color/accent_green"
+            android:textSize="56sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
 
-    <Button
-        android:id="@+id/btnEnd"
-        android:layout_width="match_parent"
-        android:layout_height="56dp"
-        android:text="@string/stop"
-        android:textColor="#FFFFFF"
-        android:backgroundTint="@color/danger_red"
-        android:enabled="false"
-        android:layout_marginTop="12dp" />
-</LinearLayout>
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="first-shot time"
+            android:textColor="@color/muted"
+            android:textSize="13sp"
+            android:layout_marginBottom="16dp" />
+
+        <ScrollView
+            android:id="@+id/scrollShots"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:background="@color/surface"
+            android:padding="12dp">
+
+            <LinearLayout
+                android:id="@+id/listShots"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </ScrollView>
+
+        <Button
+            android:id="@+id/btnStart"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="@string/start"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="@color/accent_green"
+            android:layout_marginTop="16dp" />
+
+        <Button
+            android:id="@+id/btnSimulateHit"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:text="@string/simulate_hit"
+            android:textSize="18sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="@color/amber"
+            android:enabled="false"
+            android:layout_marginTop="12dp" />
+
+        <Button
+            android:id="@+id/btnEnd"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="@string/stop"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="@color/danger_red"
+            android:enabled="false"
+            android:layout_marginTop="12dp" />
+    </LinearLayout>
+</FrameLayout>

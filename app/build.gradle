@@ -37,7 +37,12 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.15.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.2.0'
 
-    // Milestone 1 uses NO camera / OpenCV / Room / Compose.
-    // Session storage = built-in org.json → app filesDir. Settings = SharedPreferences.
-    // OpenCV gets added at Milestone 3 when the ported detector is wired in.
+    // Milestone 2: CameraX (preview + ImageAnalysis frame tap — see D-006 in DECISIONS.md).
+    // camera-camera2 is the CameraX backend; camera-lifecycle wires UseCases to Activity lifecycle.
+    // camera-view provides PreviewView. OpenCV arrives at M3 with CameraLaserDetector.
+    def camerax_version = '1.4.0'
+    implementation "androidx.camera:camera-core:${camerax_version}"
+    implementation "androidx.camera:camera-camera2:${camerax_version}"
+    implementation "androidx.camera:camera-lifecycle:${camerax_version}"
+    implementation "androidx.camera:camera-view:${camerax_version}"
 }
