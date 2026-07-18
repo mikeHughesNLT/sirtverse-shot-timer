@@ -35,13 +35,42 @@ interface LaserDetector {
 }
 ```
 
-- **M1:** `MockLaserDetector` — `simulateHit()` from a button invokes `onHit`.
-- **M3:** `CameraLaserDetector` wraps `prototypes/laser-detector-android/LaserDetector.kt`
-  and calls `onHit()` whenever the ported shot accumulator registers a deduplicated
-  green shot.
+- **M1:** `MockLaserDetector` — button directly invokes `onHit` (regression / bench testing).
+- **M3:** `CameraLaserDetector` — YUV plane-math pipeline (brightness spike + green color gate +
+  pulse state machine); calls `onHit()` on each deduplicated green shot. No OpenCV dependency.
 
-`ShotTimerActivity` never learns which implementation it's talking to. Swapping the
-mock for the camera detector is the *only* change M3 makes to the timer path.
+`ShotTimerActivity` never learns which implementation it's talking to.
+
+## The camera abstraction (M3, DECISIONS.md D-007)
+
+All camera knobs live behind `camera/CameraController`:
+
+```
+ShotTimerActivity
+  │  creates
+  ├─► CameraXController  (implements CameraController)
+  │     capabilities() — lens ID, exposure range, ISO range, fps
+  │     setExposure(shutterNs, iso) / setAutoExposure()  ← Camera2Interop
+  │     frameListener: (ImageProxy) → Unit               ← set by detector
+  │     bind(lifecycle, previewSurface)
+  │     unbind() / shutdown()
+  │
+  └─► CameraLaserDetector (implements LaserDetector)
+        start()  → registers frameListener, applies exposure policy
+        stop()   → unregisters frameListener, restores auto-exposure
+```
+
+**DUALLENS extensibility** (SPEC-2026-07-15-DUALLENS-001): a second `CameraController`
+instance covers the second rear lens (different shutter speed) — the detector and the
+timer shell never change. v1 binds ONE back lens; the interface shape makes the upgrade
+slot-in without touching either seam.
+
+```
+camera/
+  CameraCaps.kt         — data class: lens ID, exposure range, ISO range, fps
+  CameraController.kt   — interface (the seam)
+  CameraXController.kt  — CameraX + Camera2Interop implementation
+```
 
 ## The engine is framework-free
 

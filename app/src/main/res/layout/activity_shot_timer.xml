@@ -31,6 +31,19 @@
         android:orientation="vertical"
         android:padding="20dp">
 
+        <!-- M3 lab mode: detection debug overlay (score + fps). Gone when lab mode off. -->
+        <TextView
+            android:id="@+id/txtDebugOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text=""
+            android:textColor="@color/amber"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:visibility="gone"
+            android:layout_marginBottom="2dp" />
+
         <!-- Camera-off notice (visible only when permission is denied) -->
         <TextView
             android:id="@+id/txtCameraOff"

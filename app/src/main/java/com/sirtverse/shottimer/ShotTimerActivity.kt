@@ -13,59 +13,68 @@ import android.view.View
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import com.sirtverse.shottimer.camera.CameraXController
 import com.sirtverse.shottimer.databinding.ActivityShotTimerBinding
-import com.sirtverse.shottimer.domain.detection.MockLaserDetector
+import com.sirtverse.shottimer.domain.detection.CameraLaserDetector
+import com.sirtverse.shottimer.domain.detection.LaserDetector
 import com.sirtverse.shottimer.domain.shottimer.Shot
 import com.sirtverse.shottimer.domain.shottimer.ShotTimerEngine
 import com.sirtverse.shottimer.domain.shottimer.TimeFmt
 import com.sirtverse.shottimer.storage.SessionJson
 import com.sirtverse.shottimer.storage.SettingsStore
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Milestone 2 — camera preview behind the timer UI + ImageAnalysis frame tap.
+ * Milestone 3 — real [CameraLaserDetector] behind the seam; camera abstraction via
+ * [CameraXController]. Everything else — engine, session save, all widget IDs — unchanged.
  *
- * M1 engine wiring, session save, and all widget IDs are unchanged.
- * At M3 the only further change here is swapping MockLaserDetector for
- * CameraLaserDetector — everything else (engine, session, camera lifecycle) stays.
+ * M1 regression: Start → hits (simulate or real SIRT) → splits → save → history all pass.
+ * M3 gate: camera detector registers laser shots; lab overlay shows score + fps ≥ 15.
  *
  * Camera path:
- *   Permission granted → startCameraPreview() → PreviewView + ImageAnalysis bound
- *   Permission denied  → showCameraOff()      → M1 dark background + notice label
+ *   Permission granted → [CameraXController.bind] → Preview + ImageAnalysis
+ *   Permission denied  → showCameraOff → M1 dark background; timer fully functional
+ *
+ * Detector swap (the only M3 change to the timer path):
+ *   M1/M2: MockLaserDetector — button calls simulateHit()
+ *   M3:    CameraLaserDetector — real YUV pipeline; simulate button invokes onHit directly
  */
 class ShotTimerActivity : AppCompatActivity() {
 
     private lateinit var b: ActivityShotTimerBinding
     private val engine = ShotTimerEngine()
-    private val detector = MockLaserDetector()
     private lateinit var settings: SettingsStore
+
+    // ── Camera + detection (M3) ───────────────────────────────────────────────
+    private lateinit var cameraController: CameraXController
+    private lateinit var cameraDetector: CameraLaserDetector
+    private val detector: LaserDetector get() = cameraDetector
 
     private val handler = Handler(Looper.getMainLooper())
     private var pendingGo: Runnable? = null
     private var tone: ToneGenerator? = null
 
-    // ── Camera / frame tap (M2) ─────────────────────────────────────────────
+    // ── Debug overlay (lab mode) ──────────────────────────────────────────────
+    private var overlayWindowStartMs = 0L
+    private var overlayLastFrames    = 0L
 
-    private val cameraExecutor = Executors.newSingleThreadExecutor()
-    private val frameCount = AtomicLong(0L)
-    private var fpsWindowStartMs = 0L
-
-    /** Logs sustained fps every 2 s to Logcat tag "FrameTap". */
-    private val fpsLogger = object : Runnable {
+    private val debugOverlayUpdater = object : Runnable {
         override fun run() {
-            val now = System.currentTimeMillis()
-            val elapsedMs = (now - fpsWindowStartMs).coerceAtLeast(1L)
-            val count = frameCount.getAndSet(0L)
-            val fps = count * 1000.0 / elapsedMs
-            Log.d("FrameTap", "%.1f fps".format(fps))
-            fpsWindowStartMs = now
-            handler.postDelayed(this, 2000L)
+            if (::cameraDetector.isInitialized && settings.labModeEnabled) {
+                val now      = System.currentTimeMillis()
+                val elapsed  = (now - overlayWindowStartMs).coerceAtLeast(1)
+                val frames   = cameraDetector.frameCount - overlayLastFrames
+                val fps      = frames * 1000.0 / elapsed
+                overlayLastFrames      = cameraDetector.frameCount
+                overlayWindowStartMs   = now
+                val score = cameraDetector.lastScore
+                b.txtDebugOverlay.text = "%.1f fps  score=%.1f".format(fps, score)
+                b.txtDebugOverlay.visibility = View.VISIBLE
+                Log.d("FrameTap", "%.1f fps  score=%.1f".format(fps, score))
+            } else {
+                b.txtDebugOverlay.visibility = View.GONE
+            }
+            handler.postDelayed(this, 1000L)
         }
     }
 
@@ -80,14 +89,21 @@ class ShotTimerActivity : AppCompatActivity() {
         setContentView(b.root)
         settings = SettingsStore(this)
 
-        // Every registered hit flows through here — mock now, camera-backed at M3.
+        cameraController = CameraXController(this)
+        cameraDetector   = CameraLaserDetector(cameraController, this, settings)
+
+        // Every registered hit flows through here — camera-backed at M3.
         detector.onHit = { onShotRegistered() }
 
         b.btnStart.setOnClickListener { beginCountdown() }
-        b.btnSimulateHit.setOnClickListener { detector.simulateHit() }
+
+        // Simulate button: directly fires onHit for any detector — M1 regression
+        // and quick on-bench testing without a real SIRT.
+        b.btnSimulateHit.setOnClickListener { detector.onHit?.invoke() }
+
         b.btnEnd.setOnClickListener { endSession() }
 
-        // Camera: check permission → start or request (launcher registered above, before onResume).
+        // Camera: check permission → start or request.
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
@@ -95,54 +111,25 @@ class ShotTimerActivity : AppCompatActivity() {
         } else {
             requestCameraPermission.launch(Manifest.permission.CAMERA)
         }
+
+        overlayWindowStartMs = System.currentTimeMillis()
+        handler.post(debugOverlayUpdater)
     }
 
-    // ── Camera setup (M2) ───────────────────────────────────────────────────
+    // ── Camera setup (M3 — via CameraXController) ────────────────────────────
 
     private fun startCameraPreview() {
-        b.cameraScrim.visibility = View.VISIBLE
+        b.cameraScrim.visibility  = View.VISIBLE
         b.txtCameraOff.visibility = View.GONE
-
-        val providerFuture = ProcessCameraProvider.getInstance(this)
-        providerFuture.addListener({
-            val cameraProvider = providerFuture.get()
-
-            val preview = Preview.Builder().build().also {
-                it.surfaceProvider = b.previewView.surfaceProvider
-            }
-
-            // Frame tap: counts frames, logs fps every 2 s. No image processing — M3 will add that.
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor) { image ->
-                        frameCount.incrementAndGet()
-                        image.close()  // close immediately — no processing yet
-                    }
-                }
-
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-                this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                analysis
-            )
-
-            fpsWindowStartMs = System.currentTimeMillis()
-            handler.post(fpsLogger)
-
-        }, ContextCompat.getMainExecutor(this))
+        cameraController.bind(this, b.previewView.surfaceProvider)
     }
 
-    /** Called when camera permission is denied. M1 behavior: dark bg, timer fully functional. */
     private fun showCameraOff() {
-        b.cameraScrim.visibility = View.GONE
+        b.cameraScrim.visibility  = View.GONE
         b.txtCameraOff.visibility = View.VISIBLE
     }
 
-    // ── Lifecycle of one run (M1 — unchanged) ───────────────────────────────
+    // ── Lifecycle of one run (M1 — unchanged) ────────────────────────────────
 
     private fun beginCountdown() {
         engine.reset()
@@ -150,9 +137,9 @@ class ShotTimerActivity : AppCompatActivity() {
         b.listShots.removeAllViews()
         b.txtFirstShot.text = "—"
         b.txtStatus.text = getString(R.string.get_ready)
-        b.btnStart.isEnabled = false
+        b.btnStart.isEnabled       = false
         b.btnSimulateHit.isEnabled = false
-        b.btnEnd.isEnabled = true
+        b.btnEnd.isEnabled         = true
 
         val delay = settings.randomStartDelayMs()
         pendingGo = Runnable { go() }.also { handler.postDelayed(it, delay) }
@@ -180,9 +167,9 @@ class ShotTimerActivity : AppCompatActivity() {
         pendingGo = null
         detector.stop()
         b.txtStatus.text = getString(R.string.standby)
-        b.btnStart.isEnabled = true
+        b.btnStart.isEnabled       = true
         b.btnSimulateHit.isEnabled = false
-        b.btnEnd.isEnabled = false
+        b.btnEnd.isEnabled         = false
 
         val session = engine.end()
         startActivity(
@@ -217,9 +204,9 @@ class ShotTimerActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         pendingGo?.let { handler.removeCallbacks(it) }
-        handler.removeCallbacks(fpsLogger)
+        handler.removeCallbacks(debugOverlayUpdater)
         tone?.release()
         tone = null
-        cameraExecutor.shutdown()
+        cameraController.shutdown()
     }
 }

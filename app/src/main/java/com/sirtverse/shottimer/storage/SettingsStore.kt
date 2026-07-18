@@ -33,6 +33,14 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_SOUND, true)
         set(v) = prefs.edit().putBoolean(KEY_SOUND, v).apply()
 
+    /**
+     * Lab mode: enables the detection debug overlay (score, fps) and JSONL event logging.
+     * Toggle in Settings → required for rig-referee run (B-4, CC-SIRT-TIMER-M3-DETECT-001).
+     */
+    var labModeEnabled: Boolean
+        get() = prefs.getBoolean(KEY_LAB_MODE, false)
+        set(v) = prefs.edit().putBoolean(KEY_LAB_MODE, v).apply()
+
     /** Random start delay in the configured [min,max] window. */
     fun randomStartDelayMs(): Long {
         val lo = startDelayMinMs
@@ -46,5 +54,6 @@ class SettingsStore(context: Context) {
         const val KEY_COLOR = "laser_color"
         const val KEY_COOLDOWN = "cooldown_ms"
         const val KEY_SOUND = "sound_enabled"
+        const val KEY_LAB_MODE = "lab_mode_enabled"
     }
 }

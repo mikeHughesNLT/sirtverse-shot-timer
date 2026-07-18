@@ -80,6 +80,14 @@
             android:layout_height="wrap_content"
             android:text="Start beep / sound"
             android:textColor="@color/on_surface"
+            android:layout_marginBottom="8dp" />
+
+        <CheckBox
+            android:id="@+id/checkLabMode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Lab mode (detection overlay + JSONL log)"
+            android:textColor="@color/amber"
             android:layout_marginBottom="24dp" />
 
         <Button

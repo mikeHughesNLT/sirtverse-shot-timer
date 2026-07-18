@@ -69,6 +69,37 @@ CameraX is the correct M2 foundation for three reasons:
 **Trade-off accepted:** Camera2Interop (for M3 exposure experiments) is accessed via
 `androidx.camera.camera2.interop.Camera2Interop`, not via raw Camera2 APIs.
 
+## D-007 — Exposure policy v1: auto-exposure (drill-window parachute available)
+**Date:** 2026-07-18 · **Status:** Accepted · **Brief:** CC-SIRT-TIMER-M3-DETECT-001
+
+Exposure is a variable to solve (Strategy call #7 / DETECTION_LAB.md doctrine). The
+locked-dark approach from `sirtverse-android` (1 ms shutter, low ISO) prevents seeing
+the shooter and kills the pose-tracking path — clean-room-avoid.
+
+**v1 ships with auto-exposure.** `CameraLaserDetector.start()` does not pin the sensor.
+The detection pipeline relies on brightness DELTA vs a rolling per-cell background, which
+is invariant to the absolute exposure level.
+
+**Drill-window parachute** (authorized by the brief): if the rig-referee night (B-4)
+shows TPR < 0.95 and the failure mode is loss of contrast under auto-AE, apply pinned
+exposure during the active session only:
+- `CameraXController.setExposure(shutterNs=16_000_000, iso=800)` on `detector.start()`
+- `CameraXController.setAutoExposure()` on `detector.stop()`
+
+The winning policy and measured score-separation numbers will be filled in after B-3:
+
+| Mode | Shutter | ISO | Score separation (laser-on vs off) | Note |
+|------|---------|-----|-------------------------------------|------|
+| Auto AE | — | — | PENDING B-3 | v1 default |
+| Drill-window 16ms/ISO800 | 16 ms | 800 | PENDING B-3 | parachute |
+
+Record final numbers here after the rig night; update CLAUDE.md RIGHT NOW with the
+verdict.
+
+**Trade-off accepted:** auto-AE may produce lower contrast on very bright/dark scenes;
+the EMA rolling background partially compensates. If contrast is insufficient at auto-AE,
+the drill-window parachute is a one-method change with zero timer-shell impact.
+
 ## D-005 — Engine owns state, UI owns the clock
 **Date:** 2026-06-23 · **Status:** Accepted
 

@@ -22,6 +22,7 @@ class SettingsActivity : AppCompatActivity() {
         b.editDelayMax.setText(settings.startDelayMaxMs.toString())
         b.editCooldown.setText(settings.cooldownMs.toString())
         b.checkSound.isChecked = settings.soundEnabled
+        b.checkLabMode.isChecked = settings.labModeEnabled
         when (settings.laserColor) {
             SettingsStore.LaserColor.RED -> b.colorRed.isChecked = true
             SettingsStore.LaserColor.GREEN -> b.colorGreen.isChecked = true
@@ -38,6 +39,7 @@ class SettingsActivity : AppCompatActivity() {
         settings.startDelayMaxMs = max.coerceAtLeast(min)
         settings.cooldownMs = b.editCooldown.text.toString().toIntOrNull() ?: 120
         settings.soundEnabled = b.checkSound.isChecked
+        settings.labModeEnabled = b.checkLabMode.isChecked
         settings.laserColor = when {
             b.colorRed.isChecked -> SettingsStore.LaserColor.RED
             b.colorBoth.isChecked -> SettingsStore.LaserColor.BOTH
