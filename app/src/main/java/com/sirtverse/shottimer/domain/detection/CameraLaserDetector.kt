@@ -63,7 +63,13 @@ class CameraLaserDetector(
         // 10-pulse burst showed clean separation: real pulses score 31.2-50.5,
         // noise phantoms 18.2-23.9 (~0.5/s at 18f). 24f sits above the noise band
         // with a 7-point margin to the weakest real pulse.
-        @JvmField var SCORE_THRESHOLD = 24f
+        // B-4 iteration 6 (2026-07-20 night, CC Fable): 24f→16f. Under PINNED
+        // exposure (iter 5, 16ms/ISO800) the noise band collapsed to 5.3-11.1
+        // (logcat DIAG, 40s sample) — the 18-24 "noise" band was auto-exposure
+        // oscillation, now gone. But 4/10 validation pulses were missed at 24f
+        // (detected pulses scored 25.7-62.1; misses fell in the 12-23 gap).
+        // 16f sits ~45% above max observed pinned noise and catches dim pulses.
+        @JvmField var SCORE_THRESHOLD = 16f
 
         // Cb/Cr gates for green color confirmation (YCbCr, neutral = 128).
         // Pure 532 nm green → Cb ≈ 44, Cr ≈ 21.
