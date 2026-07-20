@@ -209,6 +209,16 @@ class CameraLaserDetector(
         // ── Step 3: pulse state machine ───────────────────────────────────────
         if (isCandidate) {
             pulseFrames++
+            // B-4 iteration 4 (2026-07-20 night, CC Fable): a candidate persisting
+            // beyond MAX_PULSE_FRAMES is by definition not a SIRT pulse (static
+            // reflection or a room-lighting step change, e.g. Hue scene switch).
+            // Without this, the frozen EMA background deadlocks the detector
+            // forever after any lighting change (observed: hue 'ready' scene →
+            // peak stuck at 190, absent=0, zero shots possible). Resume background
+            // adaptation so the new scene is absorbed (~2s at alpha 0.05 / 30fps).
+            if (pulseFrames > MAX_PULSE_FRAMES) {
+                updateBackground(bg, gW, yBuffer, yRowStride, yPixelStride, yLimit)
+            }
             if (greenAbsentCount >= MIN_ABSENT_FRAMES) {
                 // Rising edge — candidate for a new shot.
                 val now   = SystemClock.elapsedRealtime()
@@ -232,14 +242,21 @@ class CameraLaserDetector(
             greenAbsentCount++
 
             // Update rolling background only when no candidate is active.
-            for (i in bg.indices) {
-                val gy     = i / gW
-                val gx     = i % gW
-                val bufIdx = gy * STRIDE * yRowStride + gx * STRIDE * yPixelStride
-                if (bufIdx >= yLimit) continue
-                val yVal = (yBuffer.get(bufIdx).toInt() and 0xFF).toFloat()
-                bg[i] += EMA_ALPHA * (yVal - bg[i])
-            }
+            updateBackground(bg, gW, yBuffer, yRowStride, yPixelStride, yLimit)
+        }
+    }
+
+    private fun updateBackground(
+        bg: FloatArray, gW: Int, yBuffer: java.nio.ByteBuffer,
+        yRowStride: Int, yPixelStride: Int, yLimit: Int,
+    ) {
+        for (i in bg.indices) {
+            val gy     = i / gW
+            val gx     = i % gW
+            val bufIdx = gy * STRIDE * yRowStride + gx * STRIDE * yPixelStride
+            if (bufIdx >= yLimit) continue
+            val yVal = (yBuffer.get(bufIdx).toInt() and 0xFF).toFloat()
+            bg[i] += EMA_ALPHA * (yVal - bg[i])
         }
     }
 
