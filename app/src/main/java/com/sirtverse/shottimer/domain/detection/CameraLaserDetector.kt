@@ -58,15 +58,24 @@ class CameraLaserDetector(
         // Seeded from patch_ml_report val_delta_blob median separation.
         // B-4 iteration 1 (2026-07-19 night, CC Fable): 25f→18f. At the repositioned
         // phone distance the commanded-pulse peak measured 28.3 vs baseline ~8-11
-        // (logcat DIAG); 25f left no margin for weaker pulses. Phantom cost of the
-        // looser gate is measured by the overnight referee laser-off windows.
-        @JvmField var SCORE_THRESHOLD = 18f
+        // (logcat DIAG); 25f left no margin for weaker pulses.
+        // B-4 iteration 3: 18f→24f. With the chroma gate relaxed (iter 2), a
+        // 10-pulse burst showed clean separation: real pulses score 31.2-50.5,
+        // noise phantoms 18.2-23.9 (~0.5/s at 18f). 24f sits above the noise band
+        // with a 7-point margin to the weakest real pulse.
+        @JvmField var SCORE_THRESHOLD = 24f
 
         // Cb/Cr gates for green color confirmation (YCbCr, neutral = 128).
-        // Pure 532 nm green → Cb ≈ 44, Cr ≈ 21. Set conservatively to tolerate
-        // compression artifacts and mixed surfaces.
-        const val CB_MAX = 110
-        const val CR_MAX = 110
+        // Pure 532 nm green → Cb ≈ 44, Cr ≈ 21.
+        // B-4 iteration 2 (2026-07-19 night, CC Fable): 110/110 → 150/127. At the
+        // repositioned distance the dot core is blown to white — measured chroma at
+        // the peak cell cb=134-135, cr=119-122 (logcat DIAG_UV), so a "saturated
+        // green" gate can never pass. New semantics: "not-red, not-strongly-blue" —
+        // cr < 128 still rejects the red laser (cr >> 128) and pure white/neutral
+        // glints (cr = 128); cb < 150 rejects strong blue. Phantom cost measured by
+        // the overnight referee laser-off windows.
+        const val CB_MAX = 150
+        const val CR_MAX = 127
 
         // ── Pulse state machine ───────────────────────────────────────────────
         // Laser must be absent for this many frames before a new shot arms.
