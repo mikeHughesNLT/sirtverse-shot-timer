@@ -86,19 +86,25 @@ exposure during the active session only:
 - `CameraXController.setExposure(shutterNs=16_000_000, iso=800)` on `detector.start()`
 - `CameraXController.setAutoExposure()` on `detector.stop()`
 
-The winning policy and measured score-separation numbers will be filled in after B-3:
+**RESOLVED 2026-07-20 (B-3/B-4 rig night, CC Fable autonomous): PARACHUTE PULLED.
+v1 ships with drill-window pinned exposure 16ms/ISO800.** Commit `261e779`.
 
-| Mode | Shutter | ISO | Score separation (laser-on vs off) | Note |
-|------|---------|-----|-------------------------------------|------|
-| Auto AE | — | — | PENDING B-3 | v1 default |
-| Drill-window 16ms/ISO800 | 16 ms | 800 | PENDING B-3 | parachute |
+| Mode | Shutter | ISO | Noise band (score) | Real pulse (score) | Separation | Verdict |
+|------|---------|-----|--------------------|--------------------|-----------|---------|
+| Auto AE | auto | auto | 18.2–23.9 | 31–54 | ~1.3–2.2× | FAIL — referee TPR 0.885, phantom 100.4/10min |
+| Pinned 16ms/ISO800 | 16 ms | 800 | 5.3–11.1 | 18–147 (typ 45–108) | ~4–13× | WINNER — 0.0 phantoms/10min over 35 laser-off min (excl. rig-head fixture artifact, see daybook) |
 
-Record final numbers here after the rig night; update CLAUDE.md RIGHT NOW with the
-verdict.
+**Root cause of the auto-AE failure (measured, not speculated):** every laser pulse
+triggers AE compensation; the 1–2 s AE recovery brightens the whole scene against the
+just-adapted EMA background, producing scene-wide deltas scoring 24–41 that trail every
+pulse by +1 to +2.7 s. This inflated the noise floor into the real-pulse score range and
+generated ~1 phantom storm per pulse. Pinning at the trained capture-recipe floor
+(16ms/ISO800 — same as the X4000 rig recipe) removed the oscillation source entirely:
+noise band collapsed from 18–24 to 5–11 and SCORE_THRESHOLD dropped 24→16 (`893d98d`).
 
-**Trade-off accepted:** auto-AE may produce lower contrast on very bright/dark scenes;
-the EMA rolling background partially compensates. If contrast is insufficient at auto-AE,
-the drill-window parachute is a one-method change with zero timer-shell impact.
+`stop()` restores auto-exposure — pinning is active only during the drill window, so
+pose-tracking / normal viewing is unaffected. Full evidence chain:
+`SIRTverse.wiki/Daybooks/2026-07-20-B4-referee-night-autonomous.md`.
 
 ## D-005 — Engine owns state, UI owns the clock
 **Date:** 2026-06-23 · **Status:** Accepted
