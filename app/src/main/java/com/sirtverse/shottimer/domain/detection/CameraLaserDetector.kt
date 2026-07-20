@@ -56,7 +56,11 @@ class CameraLaserDetector(
         // ── Detection thresholds (tune via B-4 rig iteration) ────────────────
         // Y brightness delta above rolling background to score a cell as a candidate.
         // Seeded from patch_ml_report val_delta_blob median separation.
-        @JvmField var SCORE_THRESHOLD = 25f
+        // B-4 iteration 1 (2026-07-19 night, CC Fable): 25f→18f. At the repositioned
+        // phone distance the commanded-pulse peak measured 28.3 vs baseline ~8-11
+        // (logcat DIAG); 25f left no margin for weaker pulses. Phantom cost of the
+        // looser gate is measured by the overnight referee laser-off windows.
+        @JvmField var SCORE_THRESHOLD = 18f
 
         // Cb/Cr gates for green color confirmation (YCbCr, neutral = 128).
         // Pure 532 nm green → Cb ≈ 44, Cr ≈ 21. Set conservatively to tolerate
@@ -237,7 +241,12 @@ class CameraLaserDetector(
      * above half-threshold. Rejects isolated noise spikes (single-pixel glints).
      */
     private fun checkNeighbor(scores: FloatArray, peakIdx: Int, gW: Int, gH: Int): Boolean {
-        val halfThresh = SCORE_THRESHOLD * 0.5f
+        // B-4 iteration 1 (2026-07-19 night, CC Fable): factor 0.5f→0.2f. Root cause
+        // of 0/5 commanded-pulse misses: at the new phone distance the dot covers
+        // ~1 grid cell (STRIDE=4 @ 640px on a ~2px dot), so no 4-neighbor reached
+        // half-threshold — confirmed via logcat frame 16800 (peak 28.3 passed score
+        // gate, checkGreen's DIAG_UV never printed → neighbor gate was the rejector).
+        val halfThresh = SCORE_THRESHOLD * 0.2f
         val gy = peakIdx / gW
         val gx = peakIdx % gW
         // 4-connected neighbors
