@@ -129,8 +129,14 @@ class CameraLaserDetector(
 
         if (settings.labModeEnabled) openLog()
 
-        // Register frame sink — exposure policy applied per DECISIONS.md D-007.
-        // v1 ships with auto-exposure (gate-dependent parachute in the brief).
+        // Exposure policy per DECISIONS.md D-007 — PARACHUTE PULLED (B-4 iteration
+        // 5, 2026-07-20 night, CC Fable): auto-exposure failed the referee. Each
+        // 200ms pulse triggered AE compensation, and the 1-2s AE recovery produced
+        // scene-wide brightness deltas (score 24-41) that fired the detector for
+        // up to ~2.7s after every pulse — TPR ~0.53, phantom storm. Pinning to the
+        // recipe the ML lane trained on (16ms / ISO 800) removes the AE feedback
+        // loop entirely. stop() restores auto-exposure for the rest of the app.
+        cameraController.setExposure(shutterNs = 16_000_000, iso = 800)
         cameraController.frameListener = { image -> analyzeFrame(image) }
 
         Log.i(TAG, "start session=$sessionId labMode=${settings.labModeEnabled} " +
