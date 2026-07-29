@@ -237,7 +237,7 @@ class CameraLaserDetector(
                 val gapMs = if (lastShotElapsedMs >= 0) now - lastShotElapsedMs else Long.MAX_VALUE
                 if (gapMs >= settings.cooldownMs && pulseFrames <= MAX_PULSE_FRAMES) {
                     lastShotElapsedMs = now
-                    logHit(peakScore, peakIdx, gW, now)
+                    logHit(peakScore, peakIdx, gW, now, image.imageInfo.timestamp)
                     mainHandler.post { onHit?.invoke() }
                     Log.i(TAG, "SHOT frame=$frameCount score=${"%.1f".format(peakScore)} " +
                             "gap=${gapMs}ms pulseFrames=$pulseFrames")
@@ -350,13 +350,14 @@ class CameraLaserDetector(
         logWriter = null
     }
 
-    private fun logHit(score: Float, peakIdx: Int, gW: Int, elapsedMs: Long) {
+    private fun logHit(score: Float, peakIdx: Int, gW: Int, elapsedMs: Long, frameTsNs: Long) {
         val lw = logWriter ?: return
         val gx = peakIdx % gW
         val gy = peakIdx / gW
         lw.println(
             """{"type":"hit","session_id":"$sessionId",""" +
             """"elapsed_ms":$elapsedMs,"wall_ms":${System.currentTimeMillis()},""" +
+            """"frame_ts_ns":$frameTsNs,""" +
             """"peak_score":${"%.2f".format(score)},""" +
             """"peak_cell_x":$gx,"peak_cell_y":$gy,"frame":$frameCount}"""
         )

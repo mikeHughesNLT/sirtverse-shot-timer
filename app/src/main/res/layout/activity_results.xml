@@ -45,7 +45,18 @@
             android:orientation="vertical"
             android:background="@color/surface"
             android:padding="12dp"
-            android:layout_marginBottom="16dp" />
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/txtLabSummary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/amber"
+            android:textSize="13sp"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone" />
 
         <EditText
             android:id="@+id/editNotes"

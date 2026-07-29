@@ -106,6 +106,59 @@ noise band collapsed from 18–24 to 5–11 and SCORE_THRESHOLD dropped 24→16 
 pose-tracking / normal viewing is unaffected. Full evidence chain:
 `SIRTverse.wiki/Daybooks/2026-07-20-B4-referee-night-autonomous.md`.
 
+## D-008 — M4 accuracy verdict: M5 (native NDK) is needed
+**Date:** 2026-07-28 · **Status:** Accepted · **Brief:** CC-SIRT-TIMER-M4-TARGET-ANDROID-001
+
+**Test:** 25 commanded shots via Shelly green laser (ch1, 192.168.1.245), intervals
+[750, 1000, 1500, 2000 ms] × 5 reps, 200ms pulses. Session M3-1785283858018, X4000,
+lab mode, pinned 16ms/ISO800, SCORE_THRESHOLD=16, cooldown=500ms.
+
+| Metric | Result | Target | Pass? |
+|--------|--------|--------|-------|
+| TPR | 25/25 fire events matched | ≥ 0.95 | ✓ (see note) |
+| Phantom rate | ~4 / 37s ≈ 65 / 10min | < 1 / 10min | ❌ |
+| Split timing error (median) | 66 ms | < 20 ms | ❌ |
+| Split timing error (95th-pct) | 841 ms | < 40 ms | ❌ |
+| Camera fps | 30.6 fps | ≥ 15 fps | ✓ |
+
+**Verdict: M5 (native NDK) is needed.** `p95 = 841ms ≫ 40ms`.
+
+**Root cause analysis (from fire-log / JSONL timeline):**
+
+*Phantom signature:* two hits arrived ~200–250 ms after their respective laser fires
+(shots 8 and 12), vs. the consistent ~900 ms delta for all other shots. These early
+phantoms are not laser detections — with ~750 ms phone-ahead-of-laptop clock skew
+plus ~143 ms processing latency, the expected delta is ~893 ms; a 200 ms delta implies
+a hit 550 ms *before* the laser physically turned on. Likely cause: falling-edge
+transient from the prior pulse OR Shelly relay bounce on the turn-on edge of the
+subsequent pulse.
+
+*Matching cascade:* the greedy pairing algorithm claimed each phantom as the match
+for its fire event (earliest hit within 3000 ms). This displaced the real detection
+(which arrived at the expected ~900 ms) to pair with the NEXT fire event, inflating
+that pair's detected split by ~750 ms and shrinking the following pair by ~750 ms.
+Shots 8/9 and 12/13 each show symmetric error pairs (−705/+711, −708/+674) confirming
+this single-phantom cascade pattern.
+
+*Clean-shot accuracy:* removing the 4 mismatched pairs, the remaining 18/24 pairs
+show median error ~35 ms and 95th-pct ~100 ms — still above the 40 ms target but
+in the plausible range for a CameraX frame-analysis path. The timing budget is:
+frame-capture jitter (±16 ms at 30 fps) + analysis-queue latency (variable, up to
+~2–3 frames under load). The NDK path eliminates queue latency and gives nanosecond
+frame-sensor timestamps for ground-truth split reconstruction.
+
+*Additional concern:* phantom rate 65/10min (vs 0/10min in B-4 laser-off windows)
+suggests the current rig geometry produces secondary reflections or relay transients
+that the detector cannot distinguish from real pulses at SCORE_THRESHOLD=16. M5
+should include a temporal gate (accept only the first detection per 200ms pulse
+window) in addition to the tighter sensor-timestamp path.
+
+**M5 entry criteria (from this data):**
+1. Native ImageReader callback for nanosecond-accurate frame timestamps.
+2. Eliminate CameraX ImageAnalysis queue latency.
+3. Add temporal gate: after confirmed hit, suppress re-trigger for 180ms (inside the
+   200ms pulse), preventing relay-bounce phantoms.
+
 ## D-005 — Engine owns state, UI owns the clock
 **Date:** 2026-06-23 · **Status:** Accepted
 

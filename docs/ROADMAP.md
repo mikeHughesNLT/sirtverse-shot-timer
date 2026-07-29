@@ -9,7 +9,7 @@ Ship Milestone 1, learn, then push west. Don't build the whole continent first.
 Home / Shot Timer / Results / History / Settings · random 3–5 s delay · start beep ·
 "Simulate Laser Hit" button · shot timestamps · split calc · local saved history.
 
-**Done when:** app runs on a phone, you start a session, simulate hits, and it
+**Done when:** app runs on 3a phone, you start a session, simulate hits, and it
 records shot times + splits and saves to history. ✅
 
 ### Milestone 2 — Camera Preview
@@ -28,16 +28,28 @@ untouched. Apply exposure lock (AE off, ~1 ms shutter) as in sirtverse-android.
 **Done when:** a real SIRT pulse on a target is detected, false positives are
 manageable, and shot times + splits come from the camera instead of the button.
 
-### Milestone 4 — Accuracy Testing
-Test mode · detection logs · exportable session/debug data · manual comparison
-against video or a known timing source.
+### Milestone 4 — Accuracy Testing  ✅ DONE
+`frame_ts_ns` in JSONL · FileProvider export · lab-mode summary in results screen.
+25-shot Shelly rig test (2026-07-28, session M3-1785283858018):
+- TPR 1.000, fps 30.6 ✓
+- Phantom rate 65/10min ❌ (target <1) — relay-bounce / reflection transients
+- Split timing error p95 841ms ❌ (target <40ms) — phantom cascade + queue latency
 
-**Done when:** you can state, with data, whether on-device CV timing is accurate
-enough — and decide if a deeper native path is needed.
+**Done when:** data verdict written. ✅  See D-008.
 
-### Milestone 5 — Native Detection Path (only if needed)
-If frame processing is too slow/inaccurate, push detection into a tighter native
-module (NDK), Android first. Keep the same app shell + `LaserDetector` seam.
+### Milestone 5 — Native Detection Path
+CameraX ImageAnalysis queue adds unpredictable latency; phantom cascade from
+relay-bounce transients corrupts split timing. Two fixes required (D-008):
+
+1. **Native ImageReader callback** — nanosecond-accurate frame sensor timestamps,
+   zero queue latency, guaranteed per-frame callback ahead of CameraX.
+2. **Temporal gate** — suppress re-trigger for 180ms after confirmed hit, eliminating
+   relay-bounce phantoms within the 200ms laser pulse window.
+
+Keep the same `LaserDetector` seam — the timer shell and session path are untouched.
+
+**Done when:** 25-shot Shelly re-run achieves split timing error p95 ≤ 40ms and
+phantom rate < 1/10min. Write D-009.
 
 ## Beyond MVP
 

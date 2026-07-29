@@ -1,10 +1,15 @@
 package com.sirtverse.shottimer
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import com.sirtverse.shottimer.databinding.ActivitySettingsBinding
 import com.sirtverse.shottimer.storage.SettingsStore
+import java.io.File
 
 class SettingsActivity : AppCompatActivity() {
 
@@ -23,6 +28,8 @@ class SettingsActivity : AppCompatActivity() {
         b.editCooldown.setText(settings.cooldownMs.toString())
         b.checkSound.isChecked = settings.soundEnabled
         b.checkLabMode.isChecked = settings.labModeEnabled
+        b.btnExportLogs.visibility = if (settings.labModeEnabled) View.VISIBLE else View.GONE
+        b.btnExportLogs.setOnClickListener { exportLogs() }
         when (settings.laserColor) {
             SettingsStore.LaserColor.RED -> b.colorRed.isChecked = true
             SettingsStore.LaserColor.GREEN -> b.colorGreen.isChecked = true
@@ -30,6 +37,25 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         b.btnSaveSettings.setOnClickListener { save() }
+    }
+
+    private fun exportLogs() {
+        val dir = getExternalFilesDir("detections")
+        val files = dir?.listFiles { f -> f.extension == "jsonl" }.orEmpty()
+        if (files.isEmpty()) {
+            Toast.makeText(this, "No detection logs found.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uris = ArrayList<Uri>()
+        files.forEach { file ->
+            uris.add(FileProvider.getUriForFile(this, "com.sirtverse.shottimer.fileprovider", file))
+        }
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "text/plain"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Export detection logs"))
     }
 
     private fun save() {
