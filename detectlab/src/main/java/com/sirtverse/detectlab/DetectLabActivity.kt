@@ -22,12 +22,15 @@ import com.sirtverse.detectlab.databinding.ActivityDetectLabBinding
  *
  * Detection start/stop is implicit on screen appear/disappear (onResume/onPause).
  * B-5: every isShot event is logged to logcat tag "DetectLab" for detectlab_referee.py.
+ * B-2: live telemetry broadcast on UDP :9876; MARK frame-bundle receiver on UDP :9877.
  */
 class DetectLabActivity : AppCompatActivity() {
 
     private lateinit var b: ActivityDetectLabBinding
     private lateinit var cameraController: CameraXController
     private lateinit var detector: CameraLaserDetector
+    private lateinit var labBroadcaster: LabBroadcaster
+    private lateinit var markManager: MarkManager
 
     private var exposurePinned = true
 
@@ -61,6 +64,8 @@ class DetectLabActivity : AppCompatActivity() {
 
         cameraController = CameraXController(this)
         detector = CameraLaserDetector(cameraController, this, InMemoryDetectionConfig())
+        labBroadcaster = LabBroadcaster()
+        markManager = MarkManager(this)
 
         detector.onDetection = { d -> onDetection(d) }
 
@@ -76,6 +81,7 @@ class DetectLabActivity : AppCompatActivity() {
             requestCameraPermission.launch(Manifest.permission.CAMERA)
         }
 
+        markManager.start()
         lastHudMs = System.currentTimeMillis()
         handler.post(hudUpdater)
     }
@@ -86,6 +92,12 @@ class DetectLabActivity : AppCompatActivity() {
             == PackageManager.PERMISSION_GRANTED
         ) {
             detector.start()
+            // Wrap frame listener: captureFrame before detector processes, so image is still open
+            val detectorFrameListener = cameraController.frameListener
+            cameraController.frameListener = { image ->
+                markManager.captureFrame(image)
+                detectorFrameListener?.invoke(image)
+            }
         }
     }
 
@@ -98,6 +110,8 @@ class DetectLabActivity : AppCompatActivity() {
         super.onDestroy()
         handler.removeCallbacks(hudUpdater)
         cameraController.shutdown()
+        labBroadcaster.close()
+        markManager.stop()
     }
 
     // ── Camera setup ──────────────────────────────────────────────────────────
@@ -112,6 +126,8 @@ class DetectLabActivity : AppCompatActivity() {
         lastDetection = d
         frameCount++
         b.overlayView.updateDetection(d)
+        markManager.annotate(d)
+        labBroadcaster.send(d)
 
         if (d.isShot) {
             shotCount++
