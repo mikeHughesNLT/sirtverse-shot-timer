@@ -6,6 +6,8 @@
 .DS_Store
 /build
 /app/build
+/detection-core/build
+/detectlab/build
 /captures
 .externalNativeBuild
 .cxx/

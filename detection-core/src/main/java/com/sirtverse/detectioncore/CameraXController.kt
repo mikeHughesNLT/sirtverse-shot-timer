@@ -1,4 +1,4 @@
-package com.sirtverse.shottimer.camera
+package com.sirtverse.detectioncore
 
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
@@ -22,10 +22,7 @@ import java.util.concurrent.Executors
  * CameraX implementation of [CameraController].
  *
  * Wraps CameraX preview + ImageAnalysis; exposes exposure control via Camera2Interop
- * (stable in camera-camera2:1.4.0, already in dependencies — no new dep needed).
- *
- * DUALLENS note: a second instance of this class with a different CameraSelector
- * covers the second rear lens — the detector and ShotTimerActivity never change.
+ * (stable in camera-camera2:1.4.0).
  */
 class CameraXController(private val context: Context) : CameraController {
 
@@ -38,15 +35,11 @@ class CameraXController(private val context: Context) : CameraController {
 
     override var frameListener: ((ImageProxy) -> Unit)? = null
 
-    // ── Capabilities ─────────────────────────────────────────────────────────
-
     override fun capabilities(): CameraCaps {
         cachedCaps?.let { return it }
         val cam = camera ?: return CameraCaps("unknown", null, null, 30)
         return queryCaps(cam).also { cachedCaps = it }
     }
-
-    // ── Exposure control (Camera2Interop) ─────────────────────────────────────
 
     override fun setExposure(shutterNs: Long, iso: Int) {
         val cam = camera ?: run { Log.w(TAG, "setExposure called before bind"); return }
@@ -69,8 +62,6 @@ class CameraXController(private val context: Context) : CameraController {
         Log.i(TAG, "auto-exposure restored")
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
-
     override fun bind(lifecycleOwner: LifecycleOwner, previewSurface: Preview.SurfaceProvider?) {
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
@@ -86,7 +77,6 @@ class CameraXController(private val context: Context) : CameraController {
                 .build()
                 .also { ia ->
                     ia.setAnalyzer(analysisExecutor) { image ->
-                        // Deliver to listener; if null (no active session) just close.
                         val listener = frameListener
                         if (listener != null) listener(image) else image.close()
                     }
@@ -99,8 +89,8 @@ class CameraXController(private val context: Context) : CameraController {
                 preview,
                 analysis,
             )
-            cachedCaps = null   // refresh capabilities on next query
-            Log.i(TAG, "camera bound — caps will be lazy-loaded")
+            cachedCaps = null
+            Log.i(TAG, "camera bound")
 
         }, ContextCompat.getMainExecutor(context))
     }
@@ -116,8 +106,6 @@ class CameraXController(private val context: Context) : CameraController {
         Log.i(TAG, "analysis executor shut down")
     }
 
-    // ── Internal ──────────────────────────────────────────────────────────────
-
     private fun queryCaps(cam: Camera): CameraCaps {
         return try {
             val info = Camera2CameraInfo.from(cam.cameraInfo)
@@ -127,8 +115,7 @@ class CameraXController(private val context: Context) : CameraController {
             val isoRange = info.getCameraCharacteristic(
                 CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE,
             )?.let { it.lower..it.upper }
-            val lensId = info.cameraId
-            CameraCaps(lensId, exposureRange, isoRange, maxFps = 30)
+            CameraCaps(info.cameraId, exposureRange, isoRange, maxFps = 30)
         } catch (e: Exception) {
             Log.w(TAG, "capabilities query failed: ${e.message}")
             CameraCaps("unknown", null, null, 30)

@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "SIRTverse-Shot-Timer"
-include ':app'
+include ':app', ':detection-core', ':detectlab'
