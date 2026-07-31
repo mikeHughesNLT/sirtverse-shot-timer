@@ -35,6 +35,10 @@ class CameraXController(private val context: Context) : CameraController {
 
     override var frameListener: ((ImageProxy) -> Unit)? = null
 
+    // Pending exposure: if setExposure() is called before bind() completes, store and re-apply.
+    private var pendingShutterNs: Long? = null
+    private var pendingIso: Int? = null
+
     override fun capabilities(): CameraCaps {
         cachedCaps?.let { return it }
         val cam = camera ?: return CameraCaps("unknown", null, null, 30)
@@ -42,7 +46,23 @@ class CameraXController(private val context: Context) : CameraController {
     }
 
     override fun setExposure(shutterNs: Long, iso: Int) {
-        val cam = camera ?: run { Log.w(TAG, "setExposure called before bind"); return }
+        pendingShutterNs = shutterNs
+        pendingIso = iso
+        val cam = camera ?: run { Log.w(TAG, "setExposure deferred: camera not yet bound"); return }
+        applyPendingExposure(cam)
+    }
+
+    override fun setAutoExposure() {
+        pendingShutterNs = null
+        pendingIso = null
+        val cam = camera ?: return
+        Camera2CameraControl.from(cam.cameraControl).clearCaptureRequestOptions()
+        Log.i(TAG, "auto-exposure restored")
+    }
+
+    private fun applyPendingExposure(cam: Camera) {
+        val shutterNs = pendingShutterNs ?: return
+        val iso = pendingIso ?: return
         val control = Camera2CameraControl.from(cam.cameraControl)
         val opts = CaptureRequestOptions.Builder()
             .setCaptureRequestOption(
@@ -54,12 +74,6 @@ class CameraXController(private val context: Context) : CameraController {
             .build()
         control.setCaptureRequestOptions(opts)
         Log.i(TAG, "exposure pinned: shutterNs=$shutterNs iso=$iso")
-    }
-
-    override fun setAutoExposure() {
-        val cam = camera ?: return
-        Camera2CameraControl.from(cam.cameraControl).clearCaptureRequestOptions()
-        Log.i(TAG, "auto-exposure restored")
     }
 
     override fun bind(lifecycleOwner: LifecycleOwner, previewSurface: Preview.SurfaceProvider?) {
@@ -91,6 +105,8 @@ class CameraXController(private val context: Context) : CameraController {
             )
             cachedCaps = null
             Log.i(TAG, "camera bound")
+            // Re-apply any exposure requested before bind completed.
+            camera?.let { applyPendingExposure(it) }
 
         }, ContextCompat.getMainExecutor(context))
     }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DetectLab" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#4CAF50</item>
+        <item name="colorSecondary">#FFC107</item>
+        <item name="android:colorBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

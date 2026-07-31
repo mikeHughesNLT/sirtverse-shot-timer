@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DetectLab</string>
+    <string name="btn_exposure_pinned">Pinned 16ms/800</string>
+    <string name="btn_exposure_auto">Auto</string>
+</resources>
