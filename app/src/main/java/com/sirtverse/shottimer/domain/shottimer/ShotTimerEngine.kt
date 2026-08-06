@@ -62,6 +62,10 @@ class ShotTimerEngine(
         return shot
     }
 
+    /** Live elapsed time since GO, in ms, or null when not RUNNING. UI polls this for a par-time cue. */
+    fun elapsedMsOrNull(): Double? =
+        if (state == State.RUNNING) (clock() - goTimestampNs) / 1_000_000.0 else null
+
     /** Close the session and return an immutable [ShotSession]. */
     fun end(notes: String = ""): ShotSession {
         if (state == State.RUNNING) endTimestampNs = clock()

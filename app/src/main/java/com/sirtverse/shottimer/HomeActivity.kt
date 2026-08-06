@@ -3,6 +3,7 @@ package com.sirtverse.shottimer
 import android.content.Intent
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
+import com.sirtverse.shottimer.airframe.AirframeActivity
 import com.sirtverse.shottimer.databinding.ActivityHomeBinding
 
 class HomeActivity : AppCompatActivity() {
@@ -22,6 +23,9 @@ class HomeActivity : AppCompatActivity() {
         }
         b.btnSettings.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
+        }
+        b.btnAirframeDemo.setOnClickListener {
+            startActivity(Intent(this, AirframeActivity::class.java))
         }
     }
 }

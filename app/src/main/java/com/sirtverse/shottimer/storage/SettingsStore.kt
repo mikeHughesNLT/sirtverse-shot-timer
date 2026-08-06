@@ -41,6 +41,15 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_LAB_MODE, false)
         set(v) = prefs.edit().putBoolean(KEY_LAB_MODE, v).apply()
 
+    /**
+     * Feature 22 (Locked Exposure Context, Detection-Arsenal.md — #1 impact-ranked,
+     * unimplemented). Wired control only; no CV behind it yet
+     * (CC-SIRT-APPSHELL-AIRFRAME-001).
+     */
+    var lockedExposureEnabled: Boolean
+        get() = prefs.getBoolean(KEY_LOCKED_EXPOSURE, false)
+        set(v) = prefs.edit().putBoolean(KEY_LOCKED_EXPOSURE, v).apply()
+
     /** Random start delay in the configured [min,max] window. */
     fun randomStartDelayMs(): Long {
         val lo = startDelayMinMs
@@ -55,5 +64,6 @@ class SettingsStore(context: Context) {
         const val KEY_COOLDOWN = "cooldown_ms"
         const val KEY_SOUND = "sound_enabled"
         const val KEY_LAB_MODE = "lab_mode_enabled"
+        const val KEY_LOCKED_EXPOSURE = "locked_exposure_enabled"
     }
 }

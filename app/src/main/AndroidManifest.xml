@@ -22,6 +22,7 @@
         </activity>
 
         <activity android:name=".ShotTimerActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".airframe.AirframeActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".SessionResultsActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".HistoryActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".SettingsActivity" android:exported="false" android:screenOrientation="portrait" />
