@@ -19,7 +19,9 @@ import kotlin.math.max
  *   2. Peak-score check: delta > [SCORE_THRESHOLD].
  *   3. Neighbor compactness gate: ≥1 adjacent cell above half-threshold.
  *   4. Green color gate: Cb < [CB_MAX] AND Cr < [CR_MAX].
- *   5. Pulse state machine: rise-and-fall with [MIN_ABSENT_FRAMES] gap; refractory = cooldownMs.
+ *   5. Pulse state machine: rise-and-fall with a [PulseStateMachine.MIN_ABSENT_FRAMES] gap;
+ *      refractory = cooldownMs. Extracted to [PulseStateMachine] (CC-SIRT-CAPTURE-CORE-PARITY-001)
+ *      so the exact `isShot` spec is camera-free and unit-testable off-rig.
  *   6. JSONL event log (hit + near-miss) when labMode is enabled.
  *
  * Emits a [Detection] per processed frame via [onDetection] (dispatched to main thread).
@@ -51,8 +53,6 @@ class CameraLaserDetector(
         const val CB_MAX = 150
         const val CR_MAX = 127
 
-        const val MIN_ABSENT_FRAMES = 2
-        const val MAX_PULSE_FRAMES = 25
         const val EMA_ALPHA = 0.05f
         const val DIAG_EVERY_N_FRAMES = 30L
     }
@@ -66,9 +66,7 @@ class CameraLaserDetector(
     private var gridW = 0
     private var gridH = 0
 
-    private var greenAbsentCount = MIN_ABSENT_FRAMES
-    private var pulseFrames = 0
-    private var lastShotElapsedMs = -1L
+    private var pulse = PulseStateMachine()
     private var sessionId = ""
     private var logWriter: PrintWriter? = null
 
@@ -76,9 +74,7 @@ class CameraLaserDetector(
 
     override fun start() {
         sessionId = "M3-${System.currentTimeMillis()}"
-        greenAbsentCount = MIN_ABSENT_FRAMES
-        pulseFrames = 0
-        lastShotElapsedMs = -1L
+        pulse = PulseStateMachine()
         background = null
         frameCount = 0L
         lastScore = 0f
@@ -154,7 +150,7 @@ class CameraLaserDetector(
 
         if (frameCount % DIAG_EVERY_N_FRAMES == 0L) {
             Log.d(TAG, "DIAG frame=$frameCount peak=${"%.1f".format(peakScore)} " +
-                    "grid=${gW}x${gH} absent=$greenAbsentCount")
+                    "grid=${gW}x${gH} absent=${pulse.greenAbsentCount}")
         }
 
         // Peak cell coordinates and 3×3 grid position
@@ -173,34 +169,22 @@ class CameraLaserDetector(
         val isCandidate    = passColor
 
         // ── Step 3: pulse state machine ───────────────────────────────────────
-        var isShot = false
-        if (isCandidate) {
-            pulseFrames++
-            // B-4 iteration 4: candidate persisting beyond MAX_PULSE_FRAMES = static
-            // reflection or lighting step change (e.g. Hue scene switch). Resume
-            // background adaptation so the new scene is absorbed.
-            if (pulseFrames > MAX_PULSE_FRAMES) {
-                updateBackground(bg, gW, yBuffer, yRowStride, yPixelStride, yLimit)
-            }
-            if (greenAbsentCount >= MIN_ABSENT_FRAMES) {
-                val now   = SystemClock.elapsedRealtime()
-                val gapMs = if (lastShotElapsedMs >= 0) now - lastShotElapsedMs else Long.MAX_VALUE
-                if (gapMs >= config.cooldownMs && pulseFrames <= MAX_PULSE_FRAMES) {
-                    isShot = true
-                    lastShotElapsedMs = now
-                    logHit(peakScore, peakGx, peakGy, now, image.imageInfo.timestamp)
-                    Log.i(TAG, "SHOT frame=$frameCount score=${"%.1f".format(peakScore)} " +
-                            "gap=${gapMs}ms pulseFrames=$pulseFrames")
-                }
-            }
-            greenAbsentCount = 0
-        } else {
-            if (greenAbsentCount == 0 && pulseFrames in 1..MAX_PULSE_FRAMES) {
-                logNearMiss(peakScore)
-            }
-            pulseFrames = 0
-            greenAbsentCount++
+        // Camera-free spec lives in PulseStateMachine (CC-SIRT-CAPTURE-CORE-PARITY-001);
+        // this call site owns only the camera-dependent side effects it reports back.
+        val now = SystemClock.elapsedRealtime()
+        val result = pulse.onFrame(isCandidate, now, config.cooldownMs)
+        val isShot = result.isShot
+
+        if (result.resumeBackground) {
             updateBackground(bg, gW, yBuffer, yRowStride, yPixelStride, yLimit)
+        }
+        if (isShot) {
+            logHit(peakScore, peakGx, peakGy, now, image.imageInfo.timestamp)
+            Log.i(TAG, "SHOT frame=$frameCount score=${"%.1f".format(peakScore)} " +
+                    "gap=${result.gapMs}ms pulseFrames=${pulse.pulseFrames}")
+        }
+        if (result.nearMiss) {
+            logNearMiss(peakScore)
         }
 
         // ── Emit Detection every frame ─────────────────────────────────────────

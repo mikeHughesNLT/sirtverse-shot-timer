@@ -23,4 +23,7 @@ dependencies {
     api "androidx.camera:camera-lifecycle:${camerax_version}"
     api "androidx.camera:camera-view:${camerax_version}"
     implementation 'androidx.core:core-ktx:1.15.0'
+
+    // PulseStateMachine is pure Kotlin (no Android deps) — plain JUnit, no Robolectric needed.
+    testImplementation 'junit:junit:4.13.2'
 }
