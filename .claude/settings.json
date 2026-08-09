@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && if [ -n \"$(git status --porcelain)\" ]; then printf '{\"decision\":\"block\",\"reason\":\"RULE-GIT-CANONICAL-001: git status is not clean. Commit + push (or .gitignore genuine scratch) before closing.\"}'; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
