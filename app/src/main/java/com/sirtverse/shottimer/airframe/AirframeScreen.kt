@@ -2,6 +2,7 @@ package com.sirtverse.shottimer.airframe
 
 import android.media.AudioManager
 import android.media.ToneGenerator
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
@@ -31,8 +32,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.sirtverse.detectioncore.CameraLaserDetector
 import com.sirtverse.detectioncore.Detection
 import com.sirtverse.detectioncore.MockLaserDetector
 import com.sirtverse.shottimer.domain.shottimer.Shot
@@ -174,7 +178,9 @@ private fun AirframeScreen(settings: SettingsStore) {
                 liveDot = liveDot,
             )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(4.dp))
+            DetectorDiagOverlay(liveDot)
+            Spacer(Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = parSecondsText,
@@ -252,6 +258,90 @@ private fun AirframeScreen(settings: SettingsStore) {
             }
         }
     }
+}
+
+/**
+ * Per-frame detection diagnostic bar (CC-SIRT-F22-VISIBILITY-001 §B3).
+ *
+ * Read-only display of [Detection] pipeline state — no new detection logic.
+ * Gates shown:
+ *  - V (brightness): peakScore ≥ [CameraLaserDetector.SCORE_THRESHOLD]
+ *  - H (hue/color): [Detection.passColor] (Cb/Cr green gate)
+ *  - CMPCT (compactness): [Detection.passNeighbor] (4-connected neighbor gate)
+ *  - SHOT: 600 ms flash on [Detection.isShot]
+ *
+ * Works with both the [com.sirtverse.detectioncore.MockLaserDetector] (score=100 on shot,
+ * 0 otherwise) and the real [CameraLaserDetector] (per-frame sub-threshold scores visible).
+ * When the real detector is swapped in, this overlay shows actual ambient-light behavior
+ * Mike can use to verify the locked-exposure effect (Feature 22) is working.
+ */
+@Composable
+private fun DetectorDiagOverlay(liveDot: Detection?) {
+    val threshold = CameraLaserDetector.SCORE_THRESHOLD
+
+    // SHOT flash: fires once per shot (unique timestampNs), clears after 600 ms.
+    // When isShot=false, shotTs stays 0L across all idle frames — effect does not re-fire.
+    val shotTs = liveDot?.takeIf { it.isShot }?.timestampNs ?: 0L
+    var shotFlash by remember { mutableStateOf(false) }
+    LaunchedEffect(shotTs) {
+        if (shotTs > 0L) {
+            shotFlash = true
+            delay(600L)
+            shotFlash = false
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xCC0A0F14))   // semi-transparent near-black
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            val d = liveDot
+            if (d != null) {
+                val passV = d.peakScore >= threshold
+                Text(
+                    text = "score=${"%.1f".format(d.peakScore)}",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (passV) AccentGreen else Muted,
+                )
+                DiagGate("V", passV)
+                DiagGate("H", d.passColor)
+                DiagGate("CMPCT", d.passNeighbor)
+                if (shotFlash) {
+                    Text(
+                        text = "🎯 SHOT",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = AccentGreen,
+                    )
+                }
+            } else {
+                Text(
+                    text = "detector idle",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Muted,
+                )
+            }
+        }
+    }
+}
+
+/** Single gate indicator: name + ✓ (green) or ✗ (amber). */
+@Composable
+private fun DiagGate(name: String, pass: Boolean) {
+    Text(
+        text = if (pass) "$name✓" else "$name✗",
+        fontFamily = FontFamily.Monospace,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (pass) AccentGreen else Amber,
+    )
 }
 
 @Composable
