@@ -55,6 +55,15 @@ class CameraLaserDetector(
 
         const val EMA_ALPHA = 0.05f
         const val DIAG_EVERY_N_FRAMES = 30L
+
+        // Feature 22 — Locked Exposure Context (Detection-Arsenal.md rank #1).
+        // Values chosen 2026-07-20 (D-007 iteration): 16ms / ISO 800 — noise band collapsed
+        // to 5.3–11.1 under these settings, laser pulses score 47–238. Toggle via
+        // DetectionConfig.lockedExposureEnabled; stop() always restores auto-exposure.
+        // Named constants so the diagnostic overlay (CC-SIRT-F22-VISIBILITY-001 §B3) can
+        // display them and Mike can tune them via a future device-verify pass.
+        const val LOCKED_SHUTTER_NS = 16_000_000L  // 16 ms (1/62 s)
+        const val LOCKED_ISO = 800
     }
 
     private var lastScore = 0f
@@ -82,14 +91,18 @@ class CameraLaserDetector(
 
         if (config.labModeEnabled) openLog()
 
-        // Exposure policy: pinned to drill-window recipe (16ms / ISO 800).
-        // D-007 parachute: auto-exposure caused AE oscillation phantoms; pinning removes
-        // the feedback loop. stop() restores auto-exposure for the rest of the app.
-        cameraController.setExposure(shutterNs = 16_000_000, iso = 800)
+        // Feature 22 — Locked Exposure Context (Detection-Arsenal.md rank #1, D-007).
+        // Pinning removes the AE feedback loop that causes oscillation phantoms in ambient light.
+        // Only applied when lockedExposureEnabled; stop() always restores auto-exposure.
+        if (config.lockedExposureEnabled) {
+            cameraController.setExposure(shutterNs = LOCKED_SHUTTER_NS, iso = LOCKED_ISO)
+        }
         cameraController.frameListener = { image -> analyzeFrame(image) }
 
         Log.i(TAG, "start session=$sessionId labMode=${config.labModeEnabled} " +
-                "threshold=$SCORE_THRESHOLD cooldown=${config.cooldownMs}ms")
+                "threshold=$SCORE_THRESHOLD cooldown=${config.cooldownMs}ms " +
+                "lockedExposure=${config.lockedExposureEnabled} " +
+                "(${LOCKED_SHUTTER_NS / 1_000_000}ms/ISO$LOCKED_ISO)")
     }
 
     override fun stop() {
