@@ -1,7 +1,13 @@
 package com.sirtverse.shottimer.airframe
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
@@ -32,13 +38,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sirtverse.detectioncore.CameraLaserDetector
+import com.sirtverse.detectioncore.CameraXController
 import com.sirtverse.detectioncore.Detection
-import com.sirtverse.detectioncore.MockLaserDetector
+import com.sirtverse.shottimer.SettingsStoreDetectionConfig
 import com.sirtverse.shottimer.domain.shottimer.Shot
 import com.sirtverse.shottimer.domain.shottimer.ShotTimerEngine
 import com.sirtverse.shottimer.domain.shottimer.TimeFmt
@@ -72,19 +83,31 @@ fun AirframeApp(settings: SettingsStore) {
 }
 
 /**
- * The airframe spine: start/stop, par-time cue, shot list w/ splits — all driven by
- * [MockLaserDetector] behind the `LaserDetector` seam. No camera API of any kind is
- * referenced here; the only detector this file knows about is the mock.
+ * The airframe spine: start/stop, par-time cue, shot list w/ splits — driven by
+ * [CameraLaserDetector] behind the `LaserDetector` seam (CC-SIRT-AIRFRAME-REALDET-001).
+ *
+ * Camera lifecycle: [CameraXController] is created here and bound to the Compose
+ * [LocalLifecycleOwner] via a [PreviewView] surface; [CameraXController.shutdown] is called
+ * on composition disposal. Permission is requested on screen entry, mirroring
+ * ShotTimerActivity's pattern.
+ *
+ * Detection parameters (threshold, gates, EMA, cooldown) are owned by :detection-core and
+ * unchanged here — RULE-ARSENAL-001.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AirframeScreen(settings: SettingsStore) {
+    // ── Camera plumbing (CC-SIRT-AIRFRAME-REALDET-001) ──────────────────────────
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraXController = remember { CameraXController(context) }
+
     val scope = rememberCoroutineScope()
-    val detector = remember { MockLaserDetector() }
+    val detector = remember { CameraLaserDetector(cameraXController, context, SettingsStoreDetectionConfig(settings)) }
     val engine = remember { ShotTimerEngine() }
 
     var sessionState by remember { mutableStateOf(engine.state) }
-    var statusText by remember { mutableStateOf("Tap START — mock airframe, zero hardware") }
+    var statusText by remember { mutableStateOf("Tap START — real detector live") }
     val shots = remember { mutableStateListOf<Shot>() }
     var liveDot by remember { mutableStateOf<Detection?>(null) }
 
@@ -98,14 +121,31 @@ private fun AirframeScreen(settings: SettingsStore) {
     var panelOpen by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
 
+    // Camera permission — mirrors ShotTimerActivity: check first, request if absent.
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> hasCameraPermission = granted }
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    // Shutdown camera controller when this composable leaves the composition.
+    DisposableEffect(lifecycleOwner) {
+        onDispose { cameraXController.shutdown() }
+    }
+
     fun beep(tone: Int, durationMs: Int) {
         if (!settings.soundEnabled) return
         runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 100).startTone(tone, durationMs) }
     }
 
-    // Wire the seam ONCE. This file depends only on LaserDetector + Detection — no camera
-    // API of any kind. Swap point for the real detector: replace `MockLaserDetector()`
-    // above with `CameraLaserDetector(...)` — everything below is unchanged.
+    // Wire the detection seam ONCE. Everything below this block is unchanged vs mock.
     DisposableEffect(Unit) {
         detector.onDetection = { d ->
             liveDot = d
@@ -157,7 +197,7 @@ private fun AirframeScreen(settings: SettingsStore) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Airframe (Mock)", color = OnSurfaceLight) },
+                title = { Text("Airframe", color = OnSurfaceLight) },
                 actions = {
                     TextButton(onClick = { panelOpen = true }) { Text("Panel ▤") }
                 },
@@ -177,6 +217,32 @@ private fun AirframeScreen(settings: SettingsStore) {
                 onZoneChange = { targetZone = it },
                 liveDot = liveDot,
             )
+
+            Spacer(Modifier.height(4.dp))
+
+            // Camera preview — live feed from CameraXController bound to this lifecycle.
+            // Shows "permission required" if the runtime grant is pending.
+            if (hasCameraPermission) {
+                AndroidView(
+                    factory = { ctx ->
+                        PreviewView(ctx).also { pv ->
+                            cameraXController.bind(lifecycleOwner, pv.surfaceProvider)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
+                )
+            } else {
+                Text(
+                    "Camera permission required",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                )
+            }
 
             Spacer(Modifier.height(4.dp))
             DetectorDiagOverlay(liveDot)
@@ -212,7 +278,20 @@ private fun AirframeScreen(settings: SettingsStore) {
                 ) { Text("START") }
 
                 Button(
-                    onClick = { detector.simulateHit() },
+                    onClick = {
+                        // Mirrors ShotTimerActivity: synthesise an isShot Detection manually.
+                        detector.onDetection?.invoke(
+                            Detection(
+                                peakCellX    = 0, peakCellY = 0,
+                                normX        = 0.5, normY = 0.5,
+                                peakScore    = 100f,
+                                passNeighbor = true, passColor = true,
+                                isShot       = true,
+                                gridCell     = 4,
+                                timestampNs  = SystemClock.elapsedRealtimeNanos(),
+                            )
+                        )
+                    },
                     enabled = sessionState == ShotTimerEngine.State.RUNNING,
                     colors = ButtonDefaults.buttonColors(containerColor = Amber),
                     modifier = Modifier.weight(1f),
@@ -270,9 +349,9 @@ private fun AirframeScreen(settings: SettingsStore) {
  *  - CMPCT (compactness): [Detection.passNeighbor] (4-connected neighbor gate)
  *  - SHOT: 600 ms flash on [Detection.isShot]
  *
- * Works with both the [com.sirtverse.detectioncore.MockLaserDetector] (score=100 on shot,
+ * Works with both [com.sirtverse.detectioncore.MockLaserDetector] (score=100 on shot,
  * 0 otherwise) and the real [CameraLaserDetector] (per-frame sub-threshold scores visible).
- * When the real detector is swapped in, this overlay shows actual ambient-light behavior
+ * When the real detector is wired in, this overlay shows actual ambient-light behavior
  * Mike can use to verify the locked-exposure effect (Feature 22) is working.
  */
 @Composable
