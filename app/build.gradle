@@ -12,8 +12,19 @@ android {
         applicationId "com.sirtverse.shottimer"
         minSdk 29
         targetSdk 36
-        versionCode 1
-        versionName "0.1.0"
+        versionCode 2
+        versionName "0.2-prototype"
+    }
+
+    // No release keystore for prototype — sign with debug key (acceptable for internal delivery).
+    // Replace signingConfigs.release with a production keystore before TestFlight / Play Store.
+    signingConfigs {
+        release {
+            storeFile android.signingConfigs.debug.storeFile
+            storePassword android.signingConfigs.debug.storePassword
+            keyAlias android.signingConfigs.debug.keyAlias
+            keyPassword android.signingConfigs.debug.keyPassword
+        }
     }
 
     buildFeatures {
@@ -24,6 +35,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
         }
     }
 
