@@ -27,6 +27,16 @@ import androidx.compose.ui.unit.dp
 import com.sirtverse.detectioncore.Detection
 
 /**
+ * One recorded laser hit — carries position for numbered marker overlay on the camera view.
+ * Rendered as Compose composables in AirframeScreen's camera Box, not on the panel Canvas.
+ *
+ * @param number  1-based shot index within the session (from [Shot.number]).
+ * @param normX   Normalized X position (0..1, left=0) at detection time.
+ * @param normY   Normalized Y position (0..1, top=0) at detection time.
+ */
+data class HitMarker(val number: Int, val normX: Float, val normY: Float)
+
+/**
  * Target-selection scaffold (CC-SIRT-APPSHELL-AIRFRAME-001 §B-3). Two stubbed modes,
  * per CC-SIRT-TARGET-SPEC-BOTH-PLATFORMS-001 §1:
  *  - [TargetMode.AUTO] — placeholder, no CV yet. Real auto-detect is a separate brief
@@ -35,6 +45,9 @@ import com.sirtverse.detectioncore.Detection
  *    iOS `235a733` interaction (reused, not re-derived).
  * The live mock dot ([Detection.normX]/[Detection.normY]) always overlays against whatever
  * is placed, regardless of mode — this is the whole point of the seam.
+ *
+ * Hit markers (B1) are rendered as Compose composables in AirframeScreen's camera Box overlay,
+ * not here — see [AirframeScreen] camera Box + BoxWithConstraints.
  */
 enum class TargetMode { AUTO, TAP }
 
@@ -57,11 +70,17 @@ fun TargetSelectionPanel(
     onModeChange: (TargetMode) -> Unit,
     zone: TargetZone?,
     onZoneChange: (TargetZone?) -> Unit,
-    liveDot: Detection?,
     modifier: Modifier = Modifier,
 ) {
+    // Hit markers (B1) are rendered as Compose composables in AirframeScreen's camera Box
+    // overlay — not here — so they always render above the TextureView in z-order regardless
+    // of camera scaleType or hardware compositor position.
+
     Column(modifier = modifier) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             FilterChip(
                 selected = mode == TargetMode.AUTO,
                 onClick = { onModeChange(TargetMode.AUTO) },
@@ -76,56 +95,22 @@ fun TargetSelectionPanel(
                 AssistChip(onClick = { onZoneChange(null) }, label = { Text("Clear Zone") })
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(220.dp)
-                .background(PanelSurface)
-                .pointerInput(mode) {
-                    if (mode == TargetMode.TAP) {
-                        detectTapGestures { offset ->
-                            val nx = (offset.x / size.width).coerceIn(0f, 1f)
-                            val ny = (offset.y / size.height).coerceIn(0f, 1f)
-                            onZoneChange(TargetZone(nx, ny))
-                        }
-                    }
-                },
-        ) {
-            when {
-                mode == TargetMode.AUTO -> Text(
-                    "AUTO-DETECT — placeholder, no CV yet\n(see CC-SIRT-TARGET-AUTODETECT-ANDROID-001)",
-                    color = Placeholder,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-                zone == null -> Text(
-                    "Tap anywhere to place a target zone",
-                    color = Placeholder,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                zone?.let { z ->
-                    val cx = z.cx * size.width
-                    val cy = z.cy * size.height
-                    val w = 2 * TargetZone.HALF_SIZE * size.width
-                    val h = 2 * TargetZone.HALF_SIZE * size.height
-                    drawRect(
-                        color = TargetGreen,
-                        topLeft = Offset(cx - w / 2f, cy - h / 2f),
-                        size = Size(w, h),
-                        style = Stroke(width = 3f),
-                    )
-                }
-                liveDot?.let { d ->
-                    drawCircle(
-                        color = if (d.isShot) ShotRed else IdleAmber,
-                        radius = if (d.isShot) 10f else 4f,
-                        center = Offset((d.normX * size.width).toFloat(), (d.normY * size.height).toFloat()),
-                    )
-                }
-            }
+        Spacer(Modifier.height(4.dp))
+        // Zone placement hint text (no camera in this panel — target config only)
+        if (mode == TargetMode.AUTO) {
+            Text(
+                "Auto-Detect coming soon",
+                color = Placeholder,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else if (zone == null) {
+            Text(
+                "Tap the camera view to place a target zone",
+                color = Placeholder,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }

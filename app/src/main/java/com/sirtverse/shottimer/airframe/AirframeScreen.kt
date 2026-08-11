@@ -8,8 +8,12 @@ import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,6 +33,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -37,11 +42,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -93,6 +105,11 @@ fun AirframeApp(settings: SettingsStore) {
  *
  * Detection parameters (threshold, gates, EMA, cooldown) are owned by :detection-core and
  * unchanged here — RULE-ARSENAL-001.
+ *
+ * Hit markers: on each isShot, normX/normY from [Detection] are captured into [hitMarkers]
+ * and forwarded to [TargetSelectionPanel] for persistent numbered display (B1). Cleared on
+ * START/reset. Splits list below the panel shows a large last-split display + running history
+ * (B2). Par-time field moved to the Panel bottom sheet to remove camera-bleed overlap (B3).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,9 +128,17 @@ private fun AirframeScreen(settings: SettingsStore) {
     val shots = remember { mutableStateListOf<Shot>() }
     var liveDot by remember { mutableStateOf<Detection?>(null) }
 
+    // Hit markers: position captured at shot time, persisted for session (B1).
+    val hitMarkers = remember { mutableStateListOf<HitMarker>() }
+    // Derive an immutable snapshot list — new reference every time hitMarkers changes.
+    // Passing this (not hitMarkers directly) to TargetSelectionPanel guarantees
+    // Compose sees a parameter change and recomposes the panel + Canvas.
+    val hitList by remember { derivedStateOf { hitMarkers.toList() } }
+
     var targetMode by remember { mutableStateOf(TargetMode.AUTO) }
     var targetZone by remember { mutableStateOf<TargetZone?>(null) }
 
+    // Par time — owned here, displayed in the Panel bottom sheet (B3 overlap fix).
     var parSecondsText by remember { mutableStateOf("") }
     var parFiredThisRun by remember { mutableStateOf(false) }
 
@@ -150,7 +175,11 @@ private fun AirframeScreen(settings: SettingsStore) {
         detector.onDetection = { d ->
             liveDot = d
             if (d.isShot) {
-                engine.recordHit()?.let { shot -> shots.add(shot) }
+                engine.recordHit()?.let { shot ->
+                    shots.add(shot)
+                    // Capture position at shot time for persistent numbered marker (B1).
+                    hitMarkers.add(HitMarker(shot.number, d.normX.toFloat(), d.normY.toFloat()))
+                }
             }
         }
         onDispose { detector.stop() }
@@ -174,6 +203,7 @@ private fun AirframeScreen(settings: SettingsStore) {
         engine.beginCountdown()
         sessionState = engine.state
         shots.clear()
+        hitMarkers.clear()   // reset markers on new session (B1)
         liveDot = null
         parFiredThisRun = false
         statusText = "Get ready…"
@@ -210,29 +240,112 @@ private fun AirframeScreen(settings: SettingsStore) {
                 .padding(16.dp)
                 .fillMaxSize(),
         ) {
+            // ── Target mode chips ─────────────────────────────────────────────
+            // Zone placement now handled by tap gesture on the camera Box below.
             TargetSelectionPanel(
                 mode = targetMode,
                 onModeChange = { targetMode = it },
                 zone = targetZone,
                 onZoneChange = { targetZone = it },
-                liveDot = liveDot,
             )
 
             Spacer(Modifier.height(4.dp))
 
-            // Camera preview — live feed from CameraXController bound to this lifecycle.
-            // Shows "permission required" if the runtime grant is pending.
+            // ── Camera + Hit Markers overlay (B1) ────────────────────────────
+            // Architecture: Box(clipToBounds) contains:
+            //   1. AndroidView(PreviewView, COMPATIBLE/TextureView) — camera at bottom z-order.
+            //      TextureView renders in the normal View layer, allowing Compose composables
+            //      above it in the same Box to draw on top.
+            //   2. Canvas — zone rectangle + live dot (Compose layer, above TextureView).
+            //   3. BoxWithConstraints — hit markers as Compose Box composables (topmost layer).
+            //      Using Compose composables (not Canvas drawCircle) guarantees they are always
+            //      above the TextureView regardless of FILL_CENTER transform overflow.
+            // clipToBounds() prevents the TextureView's FILL_CENTER overflow from bleeding
+            // above/below this Box into adjacent composables.
             if (hasCameraPermission) {
-                AndroidView(
-                    factory = { ctx ->
-                        PreviewView(ctx).also { pv ->
-                            cameraXController.bind(lifecycleOwner, pv.surfaceProvider)
-                        }
-                    },
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(180.dp),
-                )
+                        .height(220.dp)
+                        .clipToBounds()
+                        .pointerInput(targetMode) {
+                            if (targetMode == TargetMode.TAP) {
+                                detectTapGestures { offset ->
+                                    val nx = (offset.x / size.width).coerceIn(0f, 1f)
+                                    val ny = (offset.y / size.height).coerceIn(0f, 1f)
+                                    targetZone = TargetZone(nx, ny)
+                                }
+                            }
+                        },
+                ) {
+                    // Layer 1: Camera (TextureView via COMPATIBLE — renders in View layer)
+                    AndroidView(
+                        factory = { ctx ->
+                            PreviewView(ctx).also { pv ->
+                                // COMPATIBLE = TextureView: renders in normal View/Compose layer.
+                                // Compose composables in this Box draw ABOVE the TextureView.
+                                // FILL_CENTER (default) overflow is clipped by clipToBounds().
+                                pv.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                                cameraXController.bind(lifecycleOwner, pv.surfaceProvider)
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
+                    // Layer 2: Zone rect + live dot on Canvas (above TextureView)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        targetZone?.let { z ->
+                            val cx = z.cx * size.width
+                            val cy = z.cy * size.height
+                            val w = 2 * TargetZone.HALF_SIZE * size.width
+                            val h = 2 * TargetZone.HALF_SIZE * size.height
+                            drawRect(
+                                color = Color(0xFF2EA043),
+                                topLeft = Offset(cx - w / 2f, cy - h / 2f),
+                                size = Size(w, h),
+                                style = Stroke(width = 3f),
+                            )
+                        }
+                        liveDot?.let { d ->
+                            drawCircle(
+                                color = if (d.isShot) Color(0xFFDA3633) else Color(0xFFD29922),
+                                radius = if (d.isShot) 10f else 4f,
+                                center = Offset(
+                                    (d.normX * size.width).toFloat(),
+                                    (d.normY * size.height).toFloat(),
+                                ),
+                            )
+                        }
+                    }
+
+                    // Layer 3: Numbered hit markers as Compose composables (B1).
+                    // These are always above the TextureView in z-order; no Canvas drawing
+                    // needed. hitList is derivedStateOf so a new reference arrives on each
+                    // addition — BoxWithConstraints recomposes and places updated markers.
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        val panelW = maxWidth.value   // dp
+                        val panelH = maxHeight.value  // dp
+                        hitList.forEach { hit ->
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .offset(
+                                        x = (hit.normX * panelW - 14f).dp,
+                                        y = (hit.normY * panelH - 14f).dp,
+                                    )
+                                    .background(Color(0xFFDA3633), CircleShape),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "${hit.number}",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    }
+                }
             } else {
                 Text(
                     "Camera permission required",
@@ -246,22 +359,37 @@ private fun AirframeScreen(settings: SettingsStore) {
 
             Spacer(Modifier.height(4.dp))
             DetectorDiagOverlay(liveDot)
-            Spacer(Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = parSecondsText,
-                onValueChange = { parSecondsText = it },
-                label = { Text("Par time (s, optional)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                singleLine = true,
-                enabled = sessionState != ShotTimerEngine.State.RUNNING,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(Modifier.height(8.dp))
-            Text(statusText, color = Muted)
             Spacer(Modifier.height(8.dp))
 
+            // ── Status line ──────────────────────────────────────────────────
+            Text(statusText, color = Muted, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(4.dp))
+
+            // ── Large last-split display (B2) ────────────────────────────────
+            // Shows time-from-GO for shot #1; inter-shot split for later shots.
+            // Blank when no shots yet. Updates live as each shot registers.
+            if (shots.isNotEmpty()) {
+                val last = shots.last()
+                val splitLabel = if (last.number == 1)
+                    TimeFmt.seconds(last.timeMs)
+                else
+                    "+${TimeFmt.secondsBare(last.splitMs)}s"
+                Text(
+                    text = splitLabel,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = AccentGreen,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0E1116))
+                        .padding(vertical = 2.dp),
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+
+            // ── Running shot list (shot #, elapsed, split) ───────────────────
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(shots) { shot -> ShotRow(shot) }
             }
@@ -307,10 +435,25 @@ private fun AirframeScreen(settings: SettingsStore) {
         }
     }
 
+    // ── Panel settings sheet ──────────────────────────────────────────────────
+    // Par-time field moved here to avoid camera-preview bleed-through (B3).
     if (panelOpen) {
         ModalBottomSheet(onDismissRequest = { panelOpen = false }, sheetState = sheetState) {
             Column(modifier = Modifier.padding(24.dp)) {
                 Text("Session Panel", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(16.dp))
+
+                // Par time (moved from main layout — B3 overlap fix)
+                OutlinedTextField(
+                    value = parSecondsText,
+                    onValueChange = { parSecondsText = it },
+                    label = { Text("Par time (s, optional)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    enabled = sessionState != ShotTimerEngine.State.RUNNING,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
                 Spacer(Modifier.height(16.dp))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
