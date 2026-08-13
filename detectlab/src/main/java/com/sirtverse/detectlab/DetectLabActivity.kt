@@ -63,7 +63,10 @@ class DetectLabActivity : AppCompatActivity() {
         setContentView(b.root)
 
         cameraController = CameraXController(this)
-        detector = CameraLaserDetector(cameraController, this, InMemoryDetectionConfig())
+        // P0 CC-SIRT-CALIBRATION-CAMPAIGN-002: SharedPrefsDetectionConfig replaces the
+        // hardcoded InMemoryDetectionConfig so the bench conductor can drive all D2–D9
+        // dials via ADB prefs write + force-stop + relaunch, zero APK rebuilds per rung.
+        detector = CameraLaserDetector(cameraController, this, SharedPrefsDetectionConfig(this))
         labBroadcaster = LabBroadcaster()
         markManager = MarkManager(this)
 

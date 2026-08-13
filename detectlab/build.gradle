@@ -2,6 +2,13 @@ plugins {
     id 'com.android.application'
 }
 
+// P0 CC-SIRT-CALIBRATION-CAMPAIGN-002 — version stamping.
+// versionName embeds the git short-SHA so the bench conductor can verify the installed
+// APK is the intended detector build via:
+//   adb shell dumpsys package com.sirtverse.detectlab | grep versionName
+// Mismatch = stale APK; conductor refuses the block. (Build-provenance gate, §3 rung 0.)
+def gitSha = 'git rev-parse --short HEAD'.execute().text.trim()
+
 android {
     namespace 'com.sirtverse.detectlab'
     compileSdk 36
@@ -10,8 +17,8 @@ android {
         applicationId "com.sirtverse.detectlab"
         minSdk 29
         targetSdk 36
-        versionCode 1
-        versionName "0.1.0"
+        versionCode 2
+        versionName "0.2-prototype+${gitSha}"
     }
 
     buildFeatures {

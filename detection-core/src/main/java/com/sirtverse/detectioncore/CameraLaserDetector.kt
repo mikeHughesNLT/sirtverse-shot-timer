@@ -18,12 +18,13 @@ import kotlin.math.max
  * Pipeline (YUV plane-math, no OpenCV — see DECISIONS.md D-007):
  *   1. Stride-sample Y plane → brightness delta vs rolling per-cell background.
  *   2. Peak-score check: delta > [SCORE_THRESHOLD].
- *   3. Neighbor compactness gate: ≥1 adjacent cell above half-threshold.
+ *   3. Neighbor compactness gate: ≥1 adjacent cell above [NEIGHBOR_FACTOR] × threshold.
  *   4. Green color gate: Cb < [CB_MAX] AND Cr < [CR_MAX].
  *   5. Pulse state machine: rise-and-fall with a [PulseStateMachine.MIN_ABSENT_FRAMES] gap;
  *      refractory = cooldownMs. Extracted to [PulseStateMachine] (CC-SIRT-CAPTURE-CORE-PARITY-001)
  *      so the exact `isShot` spec is camera-free and unit-testable off-rig.
- *   6. JSONL event log (hit + near-miss) when labMode is enabled.
+ *   6. JSONL event log: hit + near-miss when labMode is enabled; every-frame peak record
+ *      when benchMode is enabled (P0 CC-SIRT-CALIBRATION-CAMPAIGN-002).
  *
  * Emits a [Detection] per processed frame via [onDetection] (dispatched to main thread).
  * [Detection.isShot] is true only on the frame that fires the shot event.
@@ -47,14 +48,18 @@ class CameraLaserDetector(
         // B-4 iteration 6 (2026-07-20 night, CC Fable): 24f→16f. Under pinned exposure
         // the noise band collapsed to 5.3-11.1; 16f sits ~45% above max observed noise
         // and catches dim pulses (misses fell in 12-23 gap at 24f).
+        // P0 CAMPAIGN-002: applied from config at start() — runtime-tunable as D3.
         @JvmField var SCORE_THRESHOLD = 16f
 
         // B-4 iteration 2 (2026-07-19 night): "not-red, not-strongly-blue" semantics.
         // Cb < 150 rejects strong blue; Cr < 127 rejects red.
-        const val CB_MAX = 150
-        const val CR_MAX = 127
+        // P0 CAMPAIGN-002: @JvmField var (was const) — runtime-tunable as D6.
+        @JvmField var CB_MAX = 150
+        @JvmField var CR_MAX = 127
 
-        const val EMA_ALPHA = 0.05f
+        // P0 CAMPAIGN-002: @JvmField var (was const) — runtime-tunable as D4.
+        @JvmField var EMA_ALPHA = 0.05f
+
         const val DIAG_EVERY_N_FRAMES = 30L
 
         // CHROMA-SCORE-001 (2026-08-13, Mike ruling in DECISIONS [TARGET-EXPOSURE-001]):
@@ -65,16 +70,20 @@ class CameraLaserDetector(
         // chroma backgrounds. Frame-difference stays king; chroma tells laser from fly.
         // KILL-SWITCH: 0f restores the pre-change detector bit-for-bit. This ADDS a signal
         // (RULE-ARSENAL-001: tune, don't amputate); checkGreen is untouched, so red
-        // take-up light still never fires a shot. UNVERIFIED ON METAL as of authoring —
-        // next rig session must measure on-card TPR vs the 39% baseline and idle phantoms.
+        // take-up light still never fires a shot.
+        // P0 CAMPAIGN-002: applied from config at start() — runtime-tunable as D2.
         @JvmField var CHROMA_WEIGHT = 1.0f
+
+        // D5 neighbor factor — was hardcoded 0.2f in checkNeighbor (B-4 iteration 1).
+        // P0 CAMPAIGN-002: @JvmField var — runtime-tunable as D5.
+        @JvmField var NEIGHBOR_FACTOR = 0.2f
 
         // Feature 22 — Locked Exposure Context (Detection-Arsenal.md rank #1).
         // Values chosen 2026-07-20 (D-007 iteration): 16ms / ISO 800 — noise band collapsed
         // to 5.3–11.1 under these settings, laser pulses score 47–238. Toggle via
         // DetectionConfig.lockedExposureEnabled; stop() always restores auto-exposure.
         // Named constants so the diagnostic overlay (CC-SIRT-F22-VISIBILITY-001 §B3) can
-        // display them and Mike can tune them via a future device-verify pass.
+        // display them and Mike can tune them via config (B2 TARGET-EXPOSURE-001).
         const val LOCKED_SHUTTER_NS = 16_000_000L  // 16 ms (1/62 s)
         const val LOCKED_ISO = 800
     }
@@ -83,6 +92,9 @@ class CameraLaserDetector(
     private var frameCount = 0L
 
     @Volatile private var active = false
+
+    // Bench-mode flag cached at start() so it isn't read from config on every frame.
+    private var benchModeActive = false
 
     private var background: FloatArray? = null
     private var backgroundCb: FloatArray? = null  // CHROMA-SCORE-001
@@ -98,15 +110,32 @@ class CameraLaserDetector(
 
     override fun start() {
         sessionId = "M3-${System.currentTimeMillis()}"
-        pulse = PulseStateMachine()
         background = null
         backgroundCb = null
         backgroundCr = null
         frameCount = 0L
         lastScore = 0f
+
+        // P0 CC-SIRT-CALIBRATION-CAMPAIGN-002 — apply all D2–D9 dial values from config at
+        // every start() so adb prefs write + force-stop + relaunch changes any dial without
+        // an APK rebuild. Defaults in all config implementations match the locked constants
+        // above, so a fresh install with no prefs overrides is behaviourally identical to
+        // pre-P0. (d) git diff shows plumbing only — no threshold/value changes here.
+        CHROMA_WEIGHT   = config.chromaWeight
+        SCORE_THRESHOLD = config.scoreThreshold
+        EMA_ALPHA       = config.emaAlpha
+        NEIGHBOR_FACTOR = config.neighborFactor
+        CB_MAX          = config.cbMax
+        CR_MAX          = config.crMax
+        benchModeActive = config.benchModeEnabled
+        // D8+D9 applied via PulseStateMachine constructor — camera-free spec is in PSM.
+        pulse = PulseStateMachine(config.minAbsentFrames, config.maxPulseFrames)
+
         active = true
 
-        if (config.labModeEnabled) openLog()
+        // Open log if labMode or benchMode — both modes write to the same JSONL file;
+        // bench adds a "frame" record per frame on top of the existing hit/near_miss records.
+        if (config.labModeEnabled || benchModeActive) openLog()
 
         // Feature 22 — Locked Exposure Context (Detection-Arsenal.md rank #1, D-007).
         // Pinning removes the AE feedback loop that causes oscillation phantoms in ambient light.
@@ -120,8 +149,12 @@ class CameraLaserDetector(
         }
         cameraController.frameListener = { image -> analyzeFrame(image) }
 
-        Log.i(TAG, "start session=$sessionId labMode=${config.labModeEnabled} " +
-                "threshold=$SCORE_THRESHOLD cooldown=${config.cooldownMs}ms " +
+        Log.i(TAG, "start session=$sessionId " +
+                "labMode=${config.labModeEnabled} benchMode=$benchModeActive " +
+                "score=$SCORE_THRESHOLD chroma=$CHROMA_WEIGHT ema=$EMA_ALPHA " +
+                "neighbor=$NEIGHBOR_FACTOR cbMax=$CB_MAX crMax=$CR_MAX " +
+                "cooldown=${config.cooldownMs}ms " +
+                "absent=${config.minAbsentFrames} maxPulse=${config.maxPulseFrames} " +
                 "lockedExposure=${config.lockedExposureEnabled} " +
                 "(${shutterNs / 1_000_000}ms/ISO$iso)")
     }
@@ -180,11 +213,18 @@ class CameraLaserDetector(
         // ── Step 1: stride-sample Y (+ chroma delta) → combined scores ─────────
         // CHROMA-SCORE-001: on white paper a dot barely moves Y but moves Cb/Cr hard;
         // scoring luma-only made an on-paper dot unable to even become the peak.
+        //
+        // Bench mode additionally captures the absolute Cb/Cr at the peak cell for
+        // per-frame JSONL logging (P0 CC-SIRT-CALIBRATION-CAMPAIGN-002 §(b)).
         val scores = FloatArray(gW * gH)
         var peakScore  = 0f
         var peakIdx    = 0
         var peakYDelta = 0f
         var peakChroma = 0f
+        var peakCb     = 128f   // absolute Cb at peak cell — bench-mode JSONL
+        var peakCr     = 128f   // absolute Cr at peak cell — bench-mode JSONL
+
+        val readUv = CHROMA_WEIGHT > 0f || benchModeActive
 
         for (gy in 0 until gH) {
             for (gx in 0 until gW) {
@@ -196,13 +236,15 @@ class CameraLaserDetector(
                 val bgIdx = gy * gW + gx
                 val delta = max(0f, yVal - bg[bgIdx])
 
+                var cbVal  = 128f
+                var crVal  = 128f
                 var chroma = 0f
-                if (CHROMA_WEIGHT > 0f) {
-                    val uvIdx = (py / 2) * uvRowStride + (px / 2) * uvPixelStride
-                    if (uvIdx < cbLimit && uvIdx < crLimit) {
-                        val cb = (cbBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
-                        val cr = (crBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
-                        chroma = abs(cb - bgCb[bgIdx]) + abs(cr - bgCr[bgIdx])
+                val uvIdx  = (py / 2) * uvRowStride + (px / 2) * uvPixelStride
+                if (readUv && uvIdx < cbLimit && uvIdx < crLimit) {
+                    cbVal = (cbBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
+                    crVal = (crBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
+                    if (CHROMA_WEIGHT > 0f) {
+                        chroma = abs(cbVal - bgCb[bgIdx]) + abs(crVal - bgCr[bgIdx])
                     }
                 }
 
@@ -211,6 +253,7 @@ class CameraLaserDetector(
                 if (combined > peakScore) {
                     peakScore = combined; peakIdx = bgIdx
                     peakYDelta = delta; peakChroma = chroma
+                    peakCb = cbVal; peakCr = crVal
                 }
             }
         }
@@ -269,6 +312,25 @@ class CameraLaserDetector(
             logNearMiss(peakScore)
         }
 
+        // ── Step 4: bench-mode per-frame JSONL (P0 CC-SIRT-CALIBRATION-CAMPAIGN-002 §(b)) ──
+        if (benchModeActive) {
+            logFrame(
+                score          = peakScore,
+                yDelta         = peakYDelta,
+                chromaDelta    = peakChroma,
+                cb             = peakCb,
+                cr             = peakCr,
+                gx             = peakGx,
+                gy             = peakGy,
+                aboveThreshold = aboveThreshold,
+                passNeighbor   = passNeighbor,
+                passColor      = passColor,
+                isShot         = isShot,
+                elapsedMs      = now,
+                frameTsNs      = image.imageInfo.timestamp,
+            )
+        }
+
         // ── Emit Detection every frame ─────────────────────────────────────────
         val detection = Detection(
             peakCellX    = peakGx,
@@ -316,14 +378,15 @@ class CameraLaserDetector(
     }
 
     /**
-     * Compactness gate: ≥1 4-connected neighbor above half-threshold.
+     * Compactness gate: ≥1 4-connected neighbor above [NEIGHBOR_FACTOR] × threshold.
      * Rejects isolated noise spikes (single-pixel glints).
      *
      * B-4 iteration 1: factor 0.5f→0.2f. At the new phone distance the dot covers
      * ~1 grid cell; no 4-neighbor reached half-threshold → 0/5 missed pulses.
+     * P0 CAMPAIGN-002: factor promoted to [NEIGHBOR_FACTOR] companion var (D5).
      */
     private fun checkNeighbor(scores: FloatArray, peakIdx: Int, gW: Int, gH: Int): Boolean {
-        val halfThresh = SCORE_THRESHOLD * 0.2f
+        val halfThresh = SCORE_THRESHOLD * NEIGHBOR_FACTOR
         val gy = peakIdx / gW
         val gx = peakIdx % gW
         val n = listOf(
@@ -405,6 +468,36 @@ class CameraLaserDetector(
             """"elapsed_ms":${SystemClock.elapsedRealtime()},""" +
             """"wall_ms":${System.currentTimeMillis()},""" +
             """"peak_score":${"%.2f".format(score)},"frame":$frameCount}"""
+        )
+        lw.flush()
+    }
+
+    /**
+     * Bench-mode per-frame record — P0 CC-SIRT-CALIBRATION-CAMPAIGN-002 §(b).
+     *
+     * Written for every processed frame when [benchModeActive] is true. Contains the full
+     * peak record needed for per-channel confidence analysis: the raw luma and chroma deltas,
+     * the absolute Cb/Cr values at the peak cell, all three gate booleans, and the final
+     * isShot verdict. Hit and near-miss records continue to be written independently.
+     */
+    private fun logFrame(
+        score: Float, yDelta: Float, chromaDelta: Float,
+        cb: Float, cr: Float,
+        gx: Int, gy: Int,
+        aboveThreshold: Boolean, passNeighbor: Boolean, passColor: Boolean, isShot: Boolean,
+        elapsedMs: Long, frameTsNs: Long,
+    ) {
+        val lw = logWriter ?: return
+        lw.println(
+            """{"type":"frame","session_id":"$sessionId",""" +
+            """"elapsed_ms":$elapsedMs,"wall_ms":${System.currentTimeMillis()},""" +
+            """"frame_ts_ns":$frameTsNs,""" +
+            """"peak_score":${"%.2f".format(score)},""" +
+            """"y_delta":${"%.2f".format(yDelta)},"chroma_delta":${"%.2f".format(chromaDelta)},""" +
+            """"cb":${"%.0f".format(cb)},"cr":${"%.0f".format(cr)},""" +
+            """"peak_cell_x":$gx,"peak_cell_y":$gy,""" +
+            """"above_threshold":$aboveThreshold,"pass_neighbor":$passNeighbor,""" +
+            """"pass_color":$passColor,"is_shot":$isShot,"frame":$frameCount}"""
         )
         lw.flush()
     }
