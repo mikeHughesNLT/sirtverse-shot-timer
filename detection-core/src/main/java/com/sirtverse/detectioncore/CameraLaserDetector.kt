@@ -9,6 +9,7 @@ import androidx.camera.core.ImageProxy
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
@@ -56,6 +57,18 @@ class CameraLaserDetector(
         const val EMA_ALPHA = 0.05f
         const val DIAG_EVERY_N_FRAMES = 30L
 
+        // CHROMA-SCORE-001 (2026-08-13, Mike ruling in DECISIONS [TARGET-EXPOSURE-001]):
+        // on the white paper card a real dot moves luma only 5-15 Y-units (bar: 16) but
+        // shifts CHROMA hard — and until now chroma was read only as a pass/fail gate at
+        // the luma peak, never scored, so an on-paper dot could never even become the peak.
+        // Per-cell score is now yDelta + CHROMA_WEIGHT * (|dCb| + |dCr|) vs per-cell EMA
+        // chroma backgrounds. Frame-difference stays king; chroma tells laser from fly.
+        // KILL-SWITCH: 0f restores the pre-change detector bit-for-bit. This ADDS a signal
+        // (RULE-ARSENAL-001: tune, don't amputate); checkGreen is untouched, so red
+        // take-up light still never fires a shot. UNVERIFIED ON METAL as of authoring —
+        // next rig session must measure on-card TPR vs the 39% baseline and idle phantoms.
+        @JvmField var CHROMA_WEIGHT = 1.0f
+
         // Feature 22 — Locked Exposure Context (Detection-Arsenal.md rank #1).
         // Values chosen 2026-07-20 (D-007 iteration): 16ms / ISO 800 — noise band collapsed
         // to 5.3–11.1 under these settings, laser pulses score 47–238. Toggle via
@@ -72,6 +85,8 @@ class CameraLaserDetector(
     @Volatile private var active = false
 
     private var background: FloatArray? = null
+    private var backgroundCb: FloatArray? = null  // CHROMA-SCORE-001
+    private var backgroundCr: FloatArray? = null  // CHROMA-SCORE-001
     private var gridW = 0
     private var gridH = 0
 
@@ -85,6 +100,8 @@ class CameraLaserDetector(
         sessionId = "M3-${System.currentTimeMillis()}"
         pulse = PulseStateMachine()
         background = null
+        backgroundCb = null
+        backgroundCr = null
         frameCount = 0L
         lastScore = 0f
         active = true
@@ -137,6 +154,12 @@ class CameraLaserDetector(
             ?: FloatArray(gW * gH) { 128f }.also {
                 background = it; gridW = gW; gridH = gH
             }
+        // CHROMA-SCORE-001: per-cell chroma backgrounds. Init 128 (UV neutral); the EMA
+        // converges within ~60 frames (~2 s), same startup transient class as the Y bg.
+        val bgCb = backgroundCb?.takeIf { it.size == gW * gH }
+            ?: FloatArray(gW * gH) { 128f }.also { backgroundCb = it }
+        val bgCr = backgroundCr?.takeIf { it.size == gW * gH }
+            ?: FloatArray(gW * gH) { 128f }.also { backgroundCr = it }
 
         val yPlane       = image.planes[0]
         val yBuffer      = yPlane.buffer
@@ -144,10 +167,24 @@ class CameraLaserDetector(
         val yPixelStride = yPlane.pixelStride
         val yLimit       = yBuffer.limit()
 
-        // ── Step 1: stride-sample Y → delta scores ────────────────────────────
+        // UV planes (half resolution) — sampled per cell for the chroma-delta term.
+        val uvPlane1      = image.planes[1]
+        val uvPlane2      = image.planes[2]
+        val uvRowStride   = uvPlane1.rowStride
+        val uvPixelStride = uvPlane1.pixelStride
+        val cbBuffer      = uvPlane1.buffer
+        val crBuffer      = uvPlane2.buffer
+        val cbLimit       = cbBuffer.limit()
+        val crLimit       = crBuffer.limit()
+
+        // ── Step 1: stride-sample Y (+ chroma delta) → combined scores ─────────
+        // CHROMA-SCORE-001: on white paper a dot barely moves Y but moves Cb/Cr hard;
+        // scoring luma-only made an on-paper dot unable to even become the peak.
         val scores = FloatArray(gW * gH)
-        var peakScore = 0f
-        var peakIdx   = 0
+        var peakScore  = 0f
+        var peakIdx    = 0
+        var peakYDelta = 0f
+        var peakChroma = 0f
 
         for (gy in 0 until gH) {
             for (gx in 0 until gW) {
@@ -158,8 +195,23 @@ class CameraLaserDetector(
                 val yVal  = (yBuffer.get(bufIdx).toInt() and 0xFF).toFloat()
                 val bgIdx = gy * gW + gx
                 val delta = max(0f, yVal - bg[bgIdx])
-                scores[bgIdx] = delta
-                if (delta > peakScore) { peakScore = delta; peakIdx = bgIdx }
+
+                var chroma = 0f
+                if (CHROMA_WEIGHT > 0f) {
+                    val uvIdx = (py / 2) * uvRowStride + (px / 2) * uvPixelStride
+                    if (uvIdx < cbLimit && uvIdx < crLimit) {
+                        val cb = (cbBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
+                        val cr = (crBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
+                        chroma = abs(cb - bgCb[bgIdx]) + abs(cr - bgCr[bgIdx])
+                    }
+                }
+
+                val combined = delta + CHROMA_WEIGHT * chroma
+                scores[bgIdx] = combined
+                if (combined > peakScore) {
+                    peakScore = combined; peakIdx = bgIdx
+                    peakYDelta = delta; peakChroma = chroma
+                }
             }
         }
 
@@ -167,6 +219,7 @@ class CameraLaserDetector(
 
         if (frameCount % DIAG_EVERY_N_FRAMES == 0L) {
             Log.d(TAG, "DIAG frame=$frameCount peak=${"%.1f".format(peakScore)} " +
+                    "y=${"%.1f".format(peakYDelta)} chroma=${"%.1f".format(peakChroma)} " +
                     "grid=${gW}x${gH} absent=${pulse.greenAbsentCount}")
         }
 
@@ -200,11 +253,16 @@ class CameraLaserDetector(
         val isShot = result.isShot
 
         if (result.resumeBackground) {
-            updateBackground(bg, gW, yBuffer, yRowStride, yPixelStride, yLimit)
+            updateBackground(
+                bg, bgCb, bgCr, gW,
+                yBuffer, yRowStride, yPixelStride, yLimit,
+                cbBuffer, crBuffer, uvRowStride, uvPixelStride, cbLimit, crLimit,
+            )
         }
         if (isShot) {
-            logHit(peakScore, peakGx, peakGy, now, image.imageInfo.timestamp)
+            logHit(peakScore, peakYDelta, peakChroma, peakGx, peakGy, now, image.imageInfo.timestamp)
             Log.i(TAG, "SHOT frame=$frameCount score=${"%.1f".format(peakScore)} " +
+                    "y=${"%.1f".format(peakYDelta)} chroma=${"%.1f".format(peakChroma)} " +
                     "gap=${result.gapMs}ms pulseFrames=${pulse.pulseFrames}")
         }
         if (result.nearMiss) {
@@ -223,21 +281,37 @@ class CameraLaserDetector(
             isShot       = isShot,
             gridCell     = gridCell,
             timestampNs  = image.imageInfo.timestamp,
+            yDelta       = peakYDelta,
+            chromaDelta  = peakChroma,
         )
         mainHandler.post { onDetection?.invoke(detection) }
     }
 
     private fun updateBackground(
-        bg: FloatArray, gW: Int, yBuffer: java.nio.ByteBuffer,
-        yRowStride: Int, yPixelStride: Int, yLimit: Int,
+        bg: FloatArray, bgCb: FloatArray, bgCr: FloatArray, gW: Int,
+        yBuffer: java.nio.ByteBuffer, yRowStride: Int, yPixelStride: Int, yLimit: Int,
+        cbBuffer: java.nio.ByteBuffer, crBuffer: java.nio.ByteBuffer,
+        uvRowStride: Int, uvPixelStride: Int, cbLimit: Int, crLimit: Int,
     ) {
         for (i in bg.indices) {
             val gy     = i / gW
             val gx     = i % gW
-            val bufIdx = gy * STRIDE * yRowStride + gx * STRIDE * yPixelStride
-            if (bufIdx >= yLimit) continue
-            val yVal = (yBuffer.get(bufIdx).toInt() and 0xFF).toFloat()
-            bg[i] += EMA_ALPHA * (yVal - bg[i])
+            val px     = gx * STRIDE
+            val py     = gy * STRIDE
+            val bufIdx = py * yRowStride + px * yPixelStride
+            if (bufIdx < yLimit) {
+                val yVal = (yBuffer.get(bufIdx).toInt() and 0xFF).toFloat()
+                bg[i] += EMA_ALPHA * (yVal - bg[i])
+            }
+            // CHROMA-SCORE-001: chroma backgrounds adapt on the same frames as the Y
+            // background so slow lighting-color drift (e.g. Hue scenes) is absorbed.
+            val uvIdx = (py / 2) * uvRowStride + (px / 2) * uvPixelStride
+            if (uvIdx < cbLimit && uvIdx < crLimit) {
+                val cb = (cbBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
+                val cr = (crBuffer.get(uvIdx).toInt() and 0xFF).toFloat()
+                bgCb[i] += EMA_ALPHA * (cb - bgCb[i])
+                bgCr[i] += EMA_ALPHA * (cr - bgCr[i])
+            }
         }
     }
 
@@ -311,13 +385,14 @@ class CameraLaserDetector(
         logWriter = null
     }
 
-    private fun logHit(score: Float, gx: Int, gy: Int, elapsedMs: Long, frameTsNs: Long) {
+    private fun logHit(score: Float, yDelta: Float, chromaDelta: Float, gx: Int, gy: Int, elapsedMs: Long, frameTsNs: Long) {
         val lw = logWriter ?: return
         lw.println(
             """{"type":"hit","session_id":"$sessionId",""" +
             """"elapsed_ms":$elapsedMs,"wall_ms":${System.currentTimeMillis()},""" +
             """"frame_ts_ns":$frameTsNs,""" +
             """"peak_score":${"%.2f".format(score)},""" +
+            """"y_delta":${"%.2f".format(yDelta)},"chroma_delta":${"%.2f".format(chromaDelta)},""" +
             """"peak_cell_x":$gx,"peak_cell_y":$gy,"frame":$frameCount}"""
         )
         lw.flush()
