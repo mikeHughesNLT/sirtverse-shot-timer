@@ -14,4 +14,6 @@ class InMemoryDetectionConfig(
     override val labModeEnabled: Boolean = true,
     override val cooldownMs: Long = 150L,
     override val lockedExposureEnabled: Boolean = true,
+    override val lockedShutterNs: Long = 16_000_000L,   // 16 ms — matches CameraLaserDetector historic default
+    override val lockedIso: Int = 800,
 ) : DetectionConfig

@@ -15,4 +15,6 @@ class SettingsStoreDetectionConfig(private val store: SettingsStore) : Detection
     override val labModeEnabled: Boolean get() = store.labModeEnabled
     override val cooldownMs: Long get() = store.cooldownMs.toLong()
     override val lockedExposureEnabled: Boolean get() = store.lockedExposureEnabled
+    override val lockedShutterNs: Long get() = store.lockedShutterNs
+    override val lockedIso: Int get() = store.lockedIso
 }

@@ -93,16 +93,20 @@ class CameraLaserDetector(
 
         // Feature 22 — Locked Exposure Context (Detection-Arsenal.md rank #1, D-007).
         // Pinning removes the AE feedback loop that causes oscillation phantoms in ambient light.
-        // Only applied when lockedExposureEnabled; stop() always restores auto-exposure.
+        // ShutterNs and ISO come from config (SettingsStore) so the B2 sweep can change them
+        // per rung via ADB prefs write without rebuilding the APK.
+        // stop() always restores auto-exposure regardless of this flag.
+        val shutterNs = config.lockedShutterNs
+        val iso       = config.lockedIso
         if (config.lockedExposureEnabled) {
-            cameraController.setExposure(shutterNs = LOCKED_SHUTTER_NS, iso = LOCKED_ISO)
+            cameraController.setExposure(shutterNs = shutterNs, iso = iso)
         }
         cameraController.frameListener = { image -> analyzeFrame(image) }
 
         Log.i(TAG, "start session=$sessionId labMode=${config.labModeEnabled} " +
                 "threshold=$SCORE_THRESHOLD cooldown=${config.cooldownMs}ms " +
                 "lockedExposure=${config.lockedExposureEnabled} " +
-                "(${LOCKED_SHUTTER_NS / 1_000_000}ms/ISO$LOCKED_ISO)")
+                "(${shutterNs / 1_000_000}ms/ISO$iso)")
     }
 
     override fun stop() {

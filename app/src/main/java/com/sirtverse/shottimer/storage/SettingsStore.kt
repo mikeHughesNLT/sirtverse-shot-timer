@@ -42,13 +42,25 @@ class SettingsStore(context: Context) {
         set(v) = prefs.edit().putBoolean(KEY_LAB_MODE, v).apply()
 
     /**
-     * Feature 22 (Locked Exposure Context, Detection-Arsenal.md — #1 impact-ranked,
-     * unimplemented). Wired control only; no CV behind it yet
-     * (CC-SIRT-APPSHELL-AIRFRAME-001).
+     * Feature 22 (Locked Exposure Context, Detection-Arsenal.md — #1 impact-ranked).
+     * Defaults ON (B0 TARGET-EXPOSURE-001: prevents ~5 phantoms/10s on fresh session).
      */
     var lockedExposureEnabled: Boolean
         get() = prefs.getBoolean(KEY_LOCKED_EXPOSURE, true)
         set(v) = prefs.edit().putBoolean(KEY_LOCKED_EXPOSURE, v).apply()
+
+    /**
+     * B2 TARGET-EXPOSURE-001: runtime-tunable shutter (ns) and ISO for the exposure sweep.
+     * Defaults match historical constants so existing behaviour is unchanged.
+     * Override via ADB prefs write to sweep rungs without rebuilding the APK.
+     */
+    var lockedShutterNs: Long
+        get() = prefs.getLong(KEY_LOCKED_SHUTTER_NS, 16_000_000L)   // 16 ms default
+        set(v) = prefs.edit().putLong(KEY_LOCKED_SHUTTER_NS, v).apply()
+
+    var lockedIso: Int
+        get() = prefs.getInt(KEY_LOCKED_ISO, 800)
+        set(v) = prefs.edit().putInt(KEY_LOCKED_ISO, v).apply()
 
     /** Random start delay in the configured [min,max] window. */
     fun randomStartDelayMs(): Long {
@@ -65,5 +77,7 @@ class SettingsStore(context: Context) {
         const val KEY_SOUND = "sound_enabled"
         const val KEY_LAB_MODE = "lab_mode_enabled"
         const val KEY_LOCKED_EXPOSURE = "locked_exposure_enabled"
+        const val KEY_LOCKED_SHUTTER_NS = "locked_shutter_ns"
+        const val KEY_LOCKED_ISO = "locked_iso"
     }
 }
