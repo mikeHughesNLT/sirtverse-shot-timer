@@ -468,11 +468,6 @@ private fun AirframeScreen(settings: SettingsStore) {
                     )
                     Column {
                         Text("Locked Exposure (Feature 22)")
-                        Text(
-                            "Wired control — no CV yet (Detection-Arsenal.md #22)",
-                            color = Muted,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
                     }
                 }
                 Spacer(Modifier.height(24.dp))

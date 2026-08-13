@@ -169,8 +169,15 @@ class CameraLaserDetector(
         // Peak cell coordinates and 3×3 grid position
         val peakGx = peakIdx % gW
         val peakGy = peakIdx / gW
-        val normX  = (peakGx + 0.5) / gW
-        val normY  = (peakGy + 0.5) / gH
+        // B0 TARGET-EXPOSURE-001 (2026-08-12): analysis buffer is transposed relative to the
+        // display — a plain swap sends markers the wrong direction. Measured mapping:
+        //   markerX = 1 − normY_old  (swap + horizontal mirror: A-LR rises → dot moves left)
+        //   markerY = normX_old      (swap only)
+        // Verified: LR=51 normY_old=0.546 → markerX=0.454 vs measured 0.458 ✅
+        //           LR=57 normY_old=0.613 → markerX=0.387 vs measured 0.392 ✅
+        // RULE-ARSENAL-001: coordinate fix only — no threshold or gate change.
+        val normX  = 1.0 - (peakGy + 0.5) / gH   // markerX = 1 − normY
+        val normY  = (peakGx + 0.5) / gW           // markerY = normX
         val col    = (normX * 3).toInt().coerceIn(0, 2)
         val row    = (normY * 3).toInt().coerceIn(0, 2)
         val gridCell = row * 3 + col

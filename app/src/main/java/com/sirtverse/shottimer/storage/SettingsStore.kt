@@ -47,7 +47,7 @@ class SettingsStore(context: Context) {
      * (CC-SIRT-APPSHELL-AIRFRAME-001).
      */
     var lockedExposureEnabled: Boolean
-        get() = prefs.getBoolean(KEY_LOCKED_EXPOSURE, false)
+        get() = prefs.getBoolean(KEY_LOCKED_EXPOSURE, true)
         set(v) = prefs.edit().putBoolean(KEY_LOCKED_EXPOSURE, v).apply()
 
     /** Random start delay in the configured [min,max] window. */
