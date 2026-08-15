@@ -61,6 +61,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sirtverse.detectioncore.CameraLaserDetector
 import com.sirtverse.detectioncore.CameraXController
 import com.sirtverse.detectioncore.Detection
+import com.sirtverse.detectioncore.TargetRoi
 import com.sirtverse.shottimer.SettingsStoreDetectionConfig
 import com.sirtverse.shottimer.domain.shottimer.Shot
 import com.sirtverse.shottimer.domain.shottimer.ShotTimerEngine
@@ -143,6 +144,8 @@ private fun AirframeScreen(settings: SettingsStore) {
     var parFiredThisRun by remember { mutableStateOf(false) }
 
     var lockedExposureEnabled by remember { mutableStateOf(settings.lockedExposureEnabled) }
+    // D10 — target-region auto-meter (CC-SIRT-EXPOSURE-CONTROL-001, Feature 22).
+    var autoMeterEnabled by remember { mutableStateOf(settings.exposureAutoMeterEnabled) }
     var panelOpen by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
 
@@ -168,6 +171,13 @@ private fun AirframeScreen(settings: SettingsStore) {
     fun beep(tone: Int, durationMs: Int) {
         if (!settings.soundEnabled) return
         runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 100).startTone(tone, durationMs) }
+    }
+
+    // D10 — feed the tap-selected target zone to the detector so the auto-meter loop meters
+    // the paper region (CC-SIRT-EXPOSURE-CONTROL-001). Null zone => detector's centered fallback.
+    // TargetZone.cx/cy and TargetRoi.cx/cy share the same display-normalized space.
+    LaunchedEffect(targetZone) {
+        detector.targetRoi = targetZone?.let { TargetRoi(it.cx, it.cy, TargetZone.HALF_SIZE) }
     }
 
     // Wire the detection seam ONCE. Everything below this block is unchanged vs mock.
@@ -470,6 +480,31 @@ private fun AirframeScreen(settings: SettingsStore) {
                         Text("Locked Exposure (Feature 22)")
                     }
                 }
+
+                // D10 — target-region auto-meter (CC-SIRT-EXPOSURE-CONTROL-001).
+                // Only meaningful when Locked Exposure is on (metering needs AE off).
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Switch(
+                        checked = autoMeterEnabled,
+                        enabled = lockedExposureEnabled,
+                        onCheckedChange = {
+                            autoMeterEnabled = it
+                            settings.exposureAutoMeterEnabled = it
+                        },
+                    )
+                    Column {
+                        Text("Auto-meter target region (D10)")
+                        Text(
+                            "Holds the paper at ~luma ${settings.exposureTargetLuma} so the green dot isn't drowned",
+                            color = Muted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
                 Spacer(Modifier.height(24.dp))
                 TextButton(onClick = { panelOpen = false }) { Text("Close") }
             }
@@ -530,6 +565,18 @@ private fun DetectorDiagOverlay(liveDot: Detection?) {
                 DiagGate("V", passV)
                 DiagGate("H", d.passColor)
                 DiagGate("CMPCT", d.passNeighbor)
+                // D10 — ROI luma + commanded exposure (nonzero only while auto-meter runs).
+                // Watch luma settle toward ~150 as the paper stops blowing out (Feature 22).
+                if (d.roiLuma > 0f) {
+                    val onTarget = kotlin.math.abs(d.roiLuma - 150f) <= 15f
+                    Text(
+                        text = "luma=${"%.0f".format(d.roiLuma)} " +
+                            "${"%.1f".format(d.shutterNs / 1_000_000.0)}ms/ISO${d.iso}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (onTarget) AccentGreen else Amber,
+                    )
+                }
                 if (shotFlash) {
                     Text(
                         text = "🎯 SHOT",

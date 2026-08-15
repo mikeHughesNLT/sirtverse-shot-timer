@@ -86,6 +86,28 @@ class CameraLaserDetector(
         // display them and Mike can tune them via config (B2 TARGET-EXPOSURE-001).
         const val LOCKED_SHUTTER_NS = 16_000_000L  // 16 ms (1/62 s)
         const val LOCKED_ISO = 800
+
+        // ── D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001) ─────────
+        // Closed loop: measure median luma inside the target ROI, then step shutter/ISO so the
+        // near-white paper settles at ~[DetectionConfig.exposureTargetLuma] (default 150),
+        // leaving headroom for the +5-15-luma green dot that whole-frame exposure drowns.
+        //
+        // The loop only runs when lockedExposure AND exposureAutoMeter are both on; it reuses the
+        // existing manual-exposure path (CameraController.setExposure). AE stays OFF throughout.
+
+        // Adjust at most every N processed frames — leaves ~N frames for a commanded exposure
+        // change to propagate through the camera pipeline before the next measurement (avoids
+        // acting on stale frames / oscillation). ~2.5 adjustments/sec at 30 fps.
+        const val METER_EVERY_N_FRAMES = 12L
+        // Deadband around the setpoint — inside this, do nothing (acceptance: 150 ± 15).
+        const val METER_TOLERANCE = 15
+        // Max multiplicative exposure change per tick — damps convergence, no overshoot ringing.
+        const val METER_MAX_RATIO = 2.0f
+        // Sensor-bound fallbacks used only when CameraCaps ranges are unavailable.
+        const val METER_SHUTTER_FLOOR_NS = 125_000L    // 0.125 ms
+        const val METER_SHUTTER_CAP_NS   = 33_000_000L // 33 ms (~1/30 s — keep frame rate up)
+        const val METER_ISO_FLOOR = 100
+        const val METER_ISO_CAP   = 1600
     }
 
     private var lastScore = 0f
@@ -95,6 +117,26 @@ class CameraLaserDetector(
 
     // Bench-mode flag cached at start() so it isn't read from config on every frame.
     private var benchModeActive = false
+
+    // ── D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001) ─────────────
+    /**
+     * Region to meter, in DISPLAY-normalized coords (see [TargetRoi]). Set by the app from the
+     * tap-selected target zone; null => centered fallback box. @Volatile: written on the main
+     * thread, read on the analysis thread.
+     */
+    @Volatile var targetRoi: TargetRoi? = null
+
+    // Cached at start() so config isn't re-read every frame. meteringActive gates the whole loop.
+    private var meteringActive = false
+    private var meterSetpoint = 150
+    // Live commanded exposure the loop drives; seeded from config at start().
+    private var meterShutterNs = LOCKED_SHUTTER_NS
+    private var meterIso = LOCKED_ISO
+    // Sensor bounds resolved from CameraCaps at start(), with METER_* fallbacks.
+    private var meterShutterFloor = METER_SHUTTER_FLOOR_NS
+    private var meterShutterCap = METER_SHUTTER_CAP_NS
+    private var meterIsoFloor = METER_ISO_FLOOR
+    private var meterIsoCap = METER_ISO_CAP
 
     private var background: FloatArray? = null
     private var backgroundCb: FloatArray? = null  // CHROMA-SCORE-001
@@ -147,6 +189,27 @@ class CameraLaserDetector(
         if (config.lockedExposureEnabled) {
             cameraController.setExposure(shutterNs = shutterNs, iso = iso)
         }
+
+        // ── D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001) ─────────
+        // The closed loop only runs when BOTH lockedExposure and exposureAutoMeter are on
+        // (metering needs AE off to command shutter/ISO). When off, behaviour is identical to
+        // pre-D10: the fixed setExposure() above stands and no ROI luma is computed.
+        meteringActive = config.lockedExposureEnabled && config.exposureAutoMeterEnabled
+        meterSetpoint  = config.exposureTargetLuma
+        meterShutterNs = shutterNs   // seed the loop from the configured locked exposure
+        meterIso       = iso
+        if (meteringActive) {
+            // Resolve real sensor bounds where the camera reports them; else METER_* fallbacks.
+            val caps = cameraController.capabilities()
+            meterShutterFloor = caps.exposureRangeNs?.first ?: METER_SHUTTER_FLOOR_NS
+            meterShutterCap   = (caps.exposureRangeNs?.last ?: METER_SHUTTER_CAP_NS)
+                .coerceAtMost(METER_SHUTTER_CAP_NS)   // never below ~1/30s → keep frame rate up
+            meterIsoFloor = caps.isoRange?.first ?: METER_ISO_FLOOR
+            meterIsoCap   = caps.isoRange?.last ?: METER_ISO_CAP
+            Log.i(TAG, "D10 auto-meter ON: setpoint=$meterSetpoint " +
+                    "shutter[$meterShutterFloor..$meterShutterCap]ns iso[$meterIsoFloor..$meterIsoCap]")
+        }
+
         cameraController.frameListener = { image -> analyzeFrame(image) }
 
         Log.i(TAG, "start session=$sessionId " +
@@ -165,6 +228,33 @@ class CameraLaserDetector(
         cameraController.setAutoExposure()
         closeLog()
         Log.i(TAG, "stop session=$sessionId frames=$frameCount")
+    }
+
+    /**
+     * D10 — one closed-loop exposure step (CC-SIRT-EXPOSURE-CONTROL-001).
+     *
+     * Treats total light as E = shutterNs × ISO (linear regime; near clipping the response
+     * flattens, so we just keep stepping down until the paper comes off luma 255). The
+     * per-tick multiplicative change is clamped to [±METER_MAX_RATIO] so convergence damps
+     * instead of ringing. Shutter is moved first (keeps ISO — and thus noise — low); ISO only
+     * absorbs what the clamped shutter couldn't. AE stays OFF: [CameraController.setExposure]
+     * re-asserts CONTROL_AE_MODE_OFF on every call.
+     */
+    private fun stepExposure(roiMedian: Float) {
+        val ratio = (meterSetpoint / roiMedian.coerceAtLeast(1f))
+            .coerceIn(1f / METER_MAX_RATIO, METER_MAX_RATIO)
+        val targetE = meterShutterNs.toDouble() * meterIso.toDouble() * ratio
+        // Shutter first, clamped; then ISO absorbs the remainder, clamped; then re-derive
+        // shutter so E lands as close as the clamps allow.
+        var newShutter = (targetE / meterIso).toLong().coerceIn(meterShutterFloor, meterShutterCap)
+        var newIso     = (targetE / newShutter).toInt().coerceIn(meterIsoFloor, meterIsoCap)
+        newShutter     = (targetE / newIso).toLong().coerceIn(meterShutterFloor, meterShutterCap)
+        if (newShutter == meterShutterNs && newIso == meterIso) return  // already at a clamp — nothing to do
+        meterShutterNs = newShutter
+        meterIso       = newIso
+        cameraController.setExposure(shutterNs = newShutter, iso = newIso)
+        Log.d(TAG, "D10 step: roiLuma=${"%.0f".format(roiMedian)} -> " +
+                "shutter=${newShutter / 1_000_000.0}ms iso=$newIso (setpoint=$meterSetpoint)")
     }
 
     private fun analyzeFrame(image: ImageProxy) {
@@ -226,6 +316,26 @@ class CameraLaserDetector(
 
         val readUv = CHROMA_WEIGHT > 0f || benchModeActive
 
+        // ── D10: target-ROI luma histogram (only when metering) ────────────────
+        // ROI is in DISPLAY-normalized coords; map it back into the transposed+mirrored
+        // analysis grid using the inverse of the normX/normY mapping applied below:
+        //   gx = normY·gW − 0.5   (display-y → grid x)
+        //   gy = (1 − normX)·gH − 0.5   (display-x → grid y, mirrored)
+        // Null ROI => centered fallback box (bench / un-tapped case; rig aims at frame center).
+        val roiHist: IntArray? = if (meteringActive) IntArray(256) else null
+        var roiCount = 0
+        var roiGxLo = 0; var roiGxHi = gW - 1
+        var roiGyLo = 0; var roiGyHi = gH - 1
+        if (meteringActive) {
+            val roi = targetRoi ?: TargetRoi(0.5f, 0.5f)
+            val dxLo = roi.cx - roi.halfSize; val dxHi = roi.cx + roi.halfSize
+            val dyLo = roi.cy - roi.halfSize; val dyHi = roi.cy + roi.halfSize
+            roiGxLo = (dyLo * gW - 0.5f).toInt().coerceIn(0, gW - 1)
+            roiGxHi = (dyHi * gW - 0.5f).toInt().coerceIn(0, gW - 1)
+            roiGyLo = ((1f - dxHi) * gH - 0.5f).toInt().coerceIn(0, gH - 1)
+            roiGyHi = ((1f - dxLo) * gH - 0.5f).toInt().coerceIn(0, gH - 1)
+        }
+
         for (gy in 0 until gH) {
             for (gx in 0 until gW) {
                 val px     = gx * STRIDE
@@ -235,6 +345,11 @@ class CameraLaserDetector(
                 val yVal  = (yBuffer.get(bufIdx).toInt() and 0xFF).toFloat()
                 val bgIdx = gy * gW + gx
                 val delta = max(0f, yVal - bg[bgIdx])
+
+                if (roiHist != null && gx in roiGxLo..roiGxHi && gy in roiGyLo..roiGyHi) {
+                    roiHist[yVal.toInt()]++
+                    roiCount++
+                }
 
                 var cbVal  = 128f
                 var crVal  = 128f
@@ -259,6 +374,20 @@ class CameraLaserDetector(
         }
 
         lastScore = peakScore
+
+        // ── D10: ROI median luma + closed-loop exposure step ───────────────────
+        // Median (not mean) so a bright dot or a stray glint inside the ROI can't drag the
+        // metering target. Throttled to every METER_EVERY_N_FRAMES so a commanded shutter/ISO
+        // change has time to propagate before the next measurement (avoids oscillation).
+        var roiMedian = 0f
+        if (meteringActive && roiHist != null && roiCount > 0) {
+            val mid = roiCount / 2
+            var acc = 0
+            for (b in 0..255) { acc += roiHist[b]; if (acc > mid) { roiMedian = b.toFloat(); break } }
+            if (frameCount % METER_EVERY_N_FRAMES == 0L && abs(roiMedian - meterSetpoint) > METER_TOLERANCE) {
+                stepExposure(roiMedian)
+            }
+        }
 
         if (frameCount % DIAG_EVERY_N_FRAMES == 0L) {
             Log.d(TAG, "DIAG frame=$frameCount peak=${"%.1f".format(peakScore)} " +
@@ -345,6 +474,10 @@ class CameraLaserDetector(
             timestampNs  = image.imageInfo.timestamp,
             yDelta       = peakYDelta,
             chromaDelta  = peakChroma,
+            // D10 diagnostics — nonzero only while the auto-meter loop is running.
+            roiLuma      = if (meteringActive) roiMedian else 0f,
+            shutterNs    = if (meteringActive) meterShutterNs else 0L,
+            iso          = if (meteringActive) meterIso else 0,
         )
         mainHandler.post { onDetection?.invoke(detection) }
     }

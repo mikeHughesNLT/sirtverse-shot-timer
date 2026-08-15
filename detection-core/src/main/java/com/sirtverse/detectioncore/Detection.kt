@@ -20,4 +20,8 @@ data class Detection(
     // CHROMA-SCORE-001 diagnostics (defaults keep existing constructor call sites compiling):
     val yDelta: Float = 0f,      // luma component of peakScore
     val chromaDelta: Float = 0f, // chroma component of peakScore (|dCb| + |dCr| at peak)
+    // CC-SIRT-EXPOSURE-CONTROL-001 (D10) diagnostics — surfaced on the overlay + bench JSONL:
+    val roiLuma: Float = 0f,     // median absolute luma inside the target ROI this frame
+    val shutterNs: Long = 0L,    // exposure the detector is currently commanding (0 = unknown/AE)
+    val iso: Int = 0,            // ISO the detector is currently commanding (0 = unknown/AE)
 )

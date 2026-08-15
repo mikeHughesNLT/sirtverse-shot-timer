@@ -66,4 +66,24 @@ interface DetectionConfig {
 
     /** D9 — candidate frames beyond this trigger background resume (reflection guard). */
     val maxPulseFrames: Int
+
+    // ── D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001) ─────────────
+    // Feature 22 dial: meter exposure on the target ROI so the near-white paper sits at
+    // ~luma 150, leaving headroom for the green dot (which adds only ~5-15 luma on top).
+    // See SIRT-PISTOL-LASER-TRUTH.md §4. Pref key for the setpoint is `target_luma_setpoint`
+    // to match the bench conductor's pre-wired pref + ledger column.
+
+    /**
+     * D10 — target ROI median-luma setpoint the closed loop converges toward (default 150).
+     * Only acted on when [exposureAutoMeterEnabled] is true. Pref key: `target_luma_setpoint`.
+     */
+    val exposureTargetLuma: Int
+
+    /**
+     * D10 companion — when true (AND [lockedExposureEnabled]), the ROI-luma closed loop drives
+     * shutter/ISO each frame toward [exposureTargetLuma]. When false, behaves exactly as today:
+     * fixed [lockedShutterNs]/[lockedIso], no metering. Defaults false so the OFF-path baseline
+     * (regression step 0) is bit-identical to the pre-metering build.
+     */
+    val exposureAutoMeterEnabled: Boolean
 }

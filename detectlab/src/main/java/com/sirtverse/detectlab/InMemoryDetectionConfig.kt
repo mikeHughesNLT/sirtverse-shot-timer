@@ -31,4 +31,7 @@ class InMemoryDetectionConfig(
     override val crMax: Int = CameraLaserDetector.CR_MAX,
     override val minAbsentFrames: Int = PulseStateMachine.MIN_ABSENT_FRAMES,
     override val maxPulseFrames: Int = PulseStateMachine.MAX_PULSE_FRAMES,
+    // D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001); auto-meter off by default.
+    override val exposureTargetLuma: Int = 150,
+    override val exposureAutoMeterEnabled: Boolean = false,
 ) : DetectionConfig

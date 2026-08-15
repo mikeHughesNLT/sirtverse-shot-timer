@@ -44,6 +44,11 @@ class SharedPrefsDetectionConfig(context: Context) : DetectionConfig {
     override val minAbsentFrames:       Int     get() = prefs.getInt("min_absent_frames",  PulseStateMachine.MIN_ABSENT_FRAMES)
     override val maxPulseFrames:        Int     get() = prefs.getInt("max_pulse_frames",   PulseStateMachine.MAX_PULSE_FRAMES)
 
+    // D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001).
+    // Setpoint key matches the bench conductor's pre-wired pref; auto-meter defaults OFF.
+    override val exposureTargetLuma:       Int     get() = prefs.getInt("target_luma_setpoint", 150)
+    override val exposureAutoMeterEnabled: Boolean get() = prefs.getBoolean("exposure_auto_meter_enabled", false)
+
     companion object {
         const val PREFS_FILE = "shot_timer_settings"
     }

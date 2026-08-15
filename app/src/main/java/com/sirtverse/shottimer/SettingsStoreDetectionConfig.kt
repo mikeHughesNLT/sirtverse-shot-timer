@@ -30,4 +30,7 @@ class SettingsStoreDetectionConfig(private val store: SettingsStore) : Detection
     override val crMax:                 Int     get() = store.crMax
     override val minAbsentFrames:       Int     get() = store.minAbsentFrames
     override val maxPulseFrames:        Int     get() = store.maxPulseFrames
+    // D10 (CC-SIRT-EXPOSURE-CONTROL-001)
+    override val exposureTargetLuma:       Int     get() = store.exposureTargetLuma
+    override val exposureAutoMeterEnabled: Boolean get() = store.exposureAutoMeterEnabled
 }

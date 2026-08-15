@@ -119,6 +119,21 @@ class SettingsStore(context: Context) {
         get() = prefs.getInt(KEY_MAX_PULSE_FRAMES, PulseStateMachine.MAX_PULSE_FRAMES)
         set(v) = prefs.edit().putInt(KEY_MAX_PULSE_FRAMES, v).apply()
 
+    // ── D10 — Target-Region Exposure Control (CC-SIRT-EXPOSURE-CONTROL-001) ─────────────
+    // Feature 22 dial. Setpoint key is `target_luma_setpoint` to match the bench conductor's
+    // pre-wired pref + ledger column. Auto-meter defaults OFF so a fresh install / the Step 0
+    // OFF-path regression is bit-identical to the pre-metering build.
+
+    /** D10 — target ROI median-luma setpoint the closed loop converges toward (default 150). */
+    var exposureTargetLuma: Int
+        get() = prefs.getInt(KEY_TARGET_LUMA_SETPOINT, 150)
+        set(v) = prefs.edit().putInt(KEY_TARGET_LUMA_SETPOINT, v).apply()
+
+    /** D10 companion — when true (AND lockedExposure), the ROI-luma loop drives shutter/ISO. */
+    var exposureAutoMeterEnabled: Boolean
+        get() = prefs.getBoolean(KEY_EXPOSURE_AUTO_METER, false)
+        set(v) = prefs.edit().putBoolean(KEY_EXPOSURE_AUTO_METER, v).apply()
+
     /** Random start delay in the configured [min,max] window. */
     fun randomStartDelayMs(): Long {
         val lo = startDelayMinMs
@@ -146,5 +161,8 @@ class SettingsStore(context: Context) {
         const val KEY_CR_MAX             = "cr_max"
         const val KEY_MIN_ABSENT_FRAMES  = "min_absent_frames"
         const val KEY_MAX_PULSE_FRAMES   = "max_pulse_frames"
+        // D10 (CC-SIRT-EXPOSURE-CONTROL-001)
+        const val KEY_TARGET_LUMA_SETPOINT = "target_luma_setpoint"
+        const val KEY_EXPOSURE_AUTO_METER  = "exposure_auto_meter_enabled"
     }
 }
