@@ -134,6 +134,28 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_EXPOSURE_AUTO_METER, false)
         set(v) = prefs.edit().putBoolean(KEY_EXPOSURE_AUTO_METER, v).apply()
 
+    // ── W1a r2 — target rects + B3.5 AE metering ────────────────────────────────────────────
+
+    /**
+     * JSON array of persisted TargetRect objects. Null when no rects have been drawn.
+     * Written by AirframeScreen on every add/delete/clear; read at screen init to restore rects.
+     */
+    var targetRectsJson: String?
+        get() = prefs.getString(KEY_TARGET_RECTS_JSON, null)
+        set(v) {
+            if (v == null) prefs.edit().remove(KEY_TARGET_RECTS_JSON).apply()
+            else prefs.edit().putString(KEY_TARGET_RECTS_JSON, v).apply()
+        }
+
+    /**
+     * B3.5 — Meter to target (AE regions). When true, Camera2's CONTROL_AE_REGIONS is set
+     * to the selected target rect so the phone's AE algorithm exposes for the paper, not the
+     * surrounding room. Default ON so the truth-mode ladder runs metered by default.
+     */
+    var meterToTargetEnabled: Boolean
+        get() = prefs.getBoolean(KEY_METER_TO_TARGET, true)
+        set(v) = prefs.edit().putBoolean(KEY_METER_TO_TARGET, v).apply()
+
     /** Random start delay in the configured [min,max] window. */
     fun randomStartDelayMs(): Long {
         val lo = startDelayMinMs
@@ -164,5 +186,8 @@ class SettingsStore(context: Context) {
         // D10 (CC-SIRT-EXPOSURE-CONTROL-001)
         const val KEY_TARGET_LUMA_SETPOINT = "target_luma_setpoint"
         const val KEY_EXPOSURE_AUTO_METER  = "exposure_auto_meter_enabled"
+        // W1a r2 (CC-SIRT-TARGET-REGION-001 r2 addendum)
+        const val KEY_TARGET_RECTS_JSON    = "target_rects_json"
+        const val KEY_METER_TO_TARGET      = "meter_to_target_enabled"
     }
 }

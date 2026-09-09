@@ -10,7 +10,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.shape.CircleShape
@@ -61,7 +63,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sirtverse.detectioncore.CameraLaserDetector
 import com.sirtverse.detectioncore.CameraXController
 import com.sirtverse.detectioncore.Detection
-import com.sirtverse.detectioncore.TargetRoi
 import com.sirtverse.shottimer.SettingsStoreDetectionConfig
 import com.sirtverse.shottimer.domain.shottimer.Shot
 import com.sirtverse.shottimer.domain.shottimer.ShotTimerEngine
@@ -69,6 +70,9 @@ import com.sirtverse.shottimer.domain.shottimer.TimeFmt
 import com.sirtverse.shottimer.storage.SettingsStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.sqrt
+import kotlin.math.abs
 
 private val BgDark = Color(0xFF0E1116)
 private val SurfaceDark = Color(0xFF161B22)
@@ -99,23 +103,17 @@ fun AirframeApp(settings: SettingsStore) {
  * The airframe spine: start/stop, par-time cue, shot list w/ splits — driven by
  * [CameraLaserDetector] behind the `LaserDetector` seam (CC-SIRT-AIRFRAME-REALDET-001).
  *
- * Camera lifecycle: [CameraXController] is created here and bound to the Compose
- * [LocalLifecycleOwner] via a [PreviewView] surface; [CameraXController.shutdown] is called
- * on composition disposal. Permission is requested on screen entry, mirroring
- * ShotTimerActivity's pattern.
- *
- * Detection parameters (threshold, gates, EMA, cooldown) are owned by :detection-core and
- * unchanged here — RULE-ARSENAL-001.
- *
- * Hit markers: on each isShot, normX/normY from [Detection] are captured into [hitMarkers]
- * and forwarded to [TargetSelectionPanel] for persistent numbered display (B1). Cleared on
- * START/reset. Splits list below the panel shows a large last-split display + running history
- * (B2). Par-time field moved to the Panel bottom sheet to remove camera-bleed overlap (B3).
+ * W1a r2 (CC-SIRT-TARGET-REGION-001 r2 addendum):
+ * - Target zone replaced by a [List<TargetRect>] (up to 3, finger-drawn, free aspect).
+ * - Drag-to-draw gesture on the camera Box; tap-inside selects; long-press deletes.
+ * - Rects persisted via [SettingsStore.targetRectsJson].
+ * - [PreviewSpaceMapper] is the single coordinate-space authority.
+ * - B3.5: Camera2 AE metering region set to the selected rect when [meterToTargetEnabled].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AirframeScreen(settings: SettingsStore) {
-    // ── Camera plumbing (CC-SIRT-AIRFRAME-REALDET-001) ──────────────────────────
+    // ── Camera plumbing ───────────────────────────────────────────────────────
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraXController = remember { CameraXController(context) }
@@ -129,27 +127,31 @@ private fun AirframeScreen(settings: SettingsStore) {
     val shots = remember { mutableStateListOf<Shot>() }
     var liveDot by remember { mutableStateOf<Detection?>(null) }
 
-    // Hit markers: position captured at shot time, persisted for session (B1).
     val hitMarkers = remember { mutableStateListOf<HitMarker>() }
-    // Derive an immutable snapshot list — new reference every time hitMarkers changes.
-    // Passing this (not hitMarkers directly) to TargetSelectionPanel guarantees
-    // Compose sees a parameter change and recomposes the panel + Canvas.
     val hitList by remember { derivedStateOf { hitMarkers.toList() } }
 
-    var targetMode by remember { mutableStateOf(TargetMode.AUTO) }
-    var targetZone by remember { mutableStateOf<TargetZone?>(null) }
+    // ── Target rects (W1a r2) ─────────────────────────────────────────────────
+    var targetMode by remember { mutableStateOf(TargetMode.DRAW) }
+    val targetRects = remember { mutableStateListOf<TargetRect>() }
+    var selectedRectIdx by remember { mutableStateOf(-1) }
 
-    // Par time — owned here, displayed in the Panel bottom sheet (B3 overlap fix).
+    // Live drag preview (null = no drag in progress)
+    var liveDragStart by remember { mutableStateOf<Offset?>(null) }
+    var liveDragEnd   by remember { mutableStateOf<Offset?>(null) }
+
+    // B3.5 — Meter to target
+    var meterToTargetEnabled by remember { mutableStateOf(settings.meterToTargetEnabled) }
+
+    // Par time
     var parSecondsText by remember { mutableStateOf("") }
     var parFiredThisRun by remember { mutableStateOf(false) }
 
     var lockedExposureEnabled by remember { mutableStateOf(settings.lockedExposureEnabled) }
-    // D10 — target-region auto-meter (CC-SIRT-EXPOSURE-CONTROL-001, Feature 22).
     var autoMeterEnabled by remember { mutableStateOf(settings.exposureAutoMeterEnabled) }
     var panelOpen by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
 
-    // Camera permission — mirrors ShotTimerActivity: check first, request if absent.
+    // Camera permission
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
@@ -163,9 +165,43 @@ private fun AirframeScreen(settings: SettingsStore) {
         if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    // Shutdown camera controller when this composable leaves the composition.
     DisposableEffect(lifecycleOwner) {
         onDispose { cameraXController.shutdown() }
+    }
+
+    // Restore persisted rects on first composition
+    LaunchedEffect(Unit) {
+        val saved = settings.targetRectsJson
+        if (saved != null && targetRects.isEmpty()) {
+            runCatching { TargetRect.listFromJson(saved) }
+                .onSuccess { targetRects.addAll(it) }
+        }
+    }
+
+    fun persistRects() {
+        settings.targetRectsJson = if (targetRects.isEmpty()) null
+                                   else TargetRect.listToJson(targetRects)
+    }
+
+    // D10 — feed the selected (or first) rect's ROI to the detector for auto-meter.
+    LaunchedEffect(targetRects.size, selectedRectIdx) {
+        val roi = when {
+            targetRects.isEmpty() -> null
+            selectedRectIdx in targetRects.indices -> targetRects[selectedRectIdx].toTargetRoi()
+            else -> targetRects[0].toTargetRoi()
+        }
+        detector.targetRoi = roi
+    }
+
+    // B3.5 — apply AE metering region whenever rect selection or toggle changes.
+    LaunchedEffect(targetRects.size, selectedRectIdx, meterToTargetEnabled) {
+        if (!meterToTargetEnabled || targetRects.isEmpty()) {
+            cameraXController.clearAeMeteringRect()
+        } else {
+            val rect = if (selectedRectIdx in targetRects.indices) targetRects[selectedRectIdx]
+                       else targetRects[0]
+            cameraXController.setAeMeteringRect(rect.left(), rect.top(), rect.right(), rect.bottom())
+        }
     }
 
     fun beep(tone: Int, durationMs: Int) {
@@ -173,21 +209,12 @@ private fun AirframeScreen(settings: SettingsStore) {
         runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 100).startTone(tone, durationMs) }
     }
 
-    // D10 — feed the tap-selected target zone to the detector so the auto-meter loop meters
-    // the paper region (CC-SIRT-EXPOSURE-CONTROL-001). Null zone => detector's centered fallback.
-    // TargetZone.cx/cy and TargetRoi.cx/cy share the same display-normalized space.
-    LaunchedEffect(targetZone) {
-        detector.targetRoi = targetZone?.let { TargetRoi(it.cx, it.cy, TargetZone.HALF_SIZE) }
-    }
-
-    // Wire the detection seam ONCE. Everything below this block is unchanged vs mock.
     DisposableEffect(Unit) {
         detector.onDetection = { d ->
             liveDot = d
             if (d.isShot) {
                 engine.recordHit()?.let { shot ->
                     shots.add(shot)
-                    // Capture position at shot time for persistent numbered marker (B1).
                     hitMarkers.add(HitMarker(shot.number, d.normX.toFloat(), d.normY.toFloat()))
                 }
             }
@@ -195,7 +222,7 @@ private fun AirframeScreen(settings: SettingsStore) {
         onDispose { detector.stop() }
     }
 
-    // Par-time watchdog: one beep per run when elapsed crosses the configured par time.
+    // Par-time watchdog
     LaunchedEffect(sessionState) {
         val parMs = parSecondsText.toDoubleOrNull()?.times(1000.0)
         while (sessionState == ShotTimerEngine.State.RUNNING) {
@@ -213,7 +240,7 @@ private fun AirframeScreen(settings: SettingsStore) {
         engine.beginCountdown()
         sessionState = engine.state
         shots.clear()
-        hitMarkers.clear()   // reset markers on new session (B1)
+        hitMarkers.clear()
         liveDot = null
         parFiredThisRun = false
         statusText = "Get ready…"
@@ -251,50 +278,131 @@ private fun AirframeScreen(settings: SettingsStore) {
                 .fillMaxSize(),
         ) {
             // ── Target mode chips ─────────────────────────────────────────────
-            // Zone placement now handled by tap gesture on the camera Box below.
             TargetSelectionPanel(
                 mode = targetMode,
                 onModeChange = { targetMode = it },
-                zone = targetZone,
-                onZoneChange = { targetZone = it },
+                rectCount = targetRects.size,
+                onClearAll = {
+                    targetRects.clear()
+                    selectedRectIdx = -1
+                    persistRects()
+                },
             )
 
             Spacer(Modifier.height(4.dp))
 
-            // ── Camera + Hit Markers overlay (B1) ────────────────────────────
-            // Architecture: Box(clipToBounds) contains:
-            //   1. AndroidView(PreviewView, COMPATIBLE/TextureView) — camera at bottom z-order.
-            //      TextureView renders in the normal View layer, allowing Compose composables
-            //      above it in the same Box to draw on top.
-            //   2. Canvas — zone rectangle + live dot (Compose layer, above TextureView).
-            //   3. BoxWithConstraints — hit markers as Compose Box composables (topmost layer).
-            //      Using Compose composables (not Canvas drawCircle) guarantees they are always
-            //      above the TextureView regardless of FILL_CENTER transform overflow.
-            // clipToBounds() prevents the TextureView's FILL_CENTER overflow from bleeding
-            // above/below this Box into adjacent composables.
+            // ── Camera + hit-marker overlay ───────────────────────────────────
             if (hasCameraPermission) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(220.dp)
                         .clipToBounds()
-                        .pointerInput(targetMode) {
-                            if (targetMode == TargetMode.TAP) {
-                                detectTapGestures { offset ->
-                                    val nx = (offset.x / size.width).coerceIn(0f, 1f)
-                                    val ny = (offset.y / size.height).coerceIn(0f, 1f)
-                                    targetZone = TargetZone(nx, ny)
+                        .pointerInput(targetMode, targetRects.size) {
+                            if (targetMode != TargetMode.DRAW) return@pointerInput
+                            val touchSlop = viewConfiguration.touchSlop
+                            val longPressMs = 500L
+
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val startPos = down.position
+                                down.consume()
+
+                                var currentPos = startPos
+                                var isDrag = false
+
+                                // Race: long-press vs first significant move
+                                val gestureKind = withTimeoutOrNull(longPressMs) {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                            ?: return@withTimeoutOrNull "up"
+                                        currentPos = change.position
+                                        val d = change.position - startPos
+                                        if (sqrt(d.x * d.x + d.y * d.y) > touchSlop) {
+                                            change.consume()
+                                            return@withTimeoutOrNull "drag"
+                                        }
+                                        if (!change.pressed) return@withTimeoutOrNull "tap"
+                                    }
+                                    "unreachable"
+                                }
+
+                                when {
+                                    // Long press → delete rect under the touch point
+                                    gestureKind == null -> {
+                                        val nx = startPos.x / size.width.toFloat()
+                                        val ny = startPos.y / size.height.toFloat()
+                                        val idx = targetRects.indexOfFirst { it.contains(nx, ny) }
+                                        if (idx >= 0) {
+                                            targetRects.removeAt(idx)
+                                            if (selectedRectIdx == idx) selectedRectIdx = -1
+                                            else if (selectedRectIdx > idx) selectedRectIdx--
+                                            persistRects()
+                                        }
+                                        // consume remaining events until finger up
+                                        while (true) {
+                                            val ev = awaitPointerEvent()
+                                            if (ev.changes.all { !it.pressed }) break
+                                        }
+                                    }
+
+                                    // Tap → select rect under touch, or deselect
+                                    gestureKind == "tap" -> {
+                                        val nx = startPos.x / size.width.toFloat()
+                                        val ny = startPos.y / size.height.toFloat()
+                                        val idx = targetRects.indexOfFirst { it.contains(nx, ny) }
+                                        selectedRectIdx = idx
+                                    }
+
+                                    // Drag → draw new rect (if under limit)
+                                    else -> {
+                                        isDrag = true
+                                        liveDragStart = startPos
+                                        liveDragEnd = currentPos
+
+                                        // Track drag until finger up
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val change = event.changes.firstOrNull { it.id == down.id }
+                                                ?: break
+                                            change.consume()
+                                            currentPos = change.position
+                                            liveDragEnd = currentPos
+                                            if (!change.pressed) break
+                                        }
+
+                                        liveDragStart = null
+                                        liveDragEnd = null
+
+                                        // Finalize: build TargetRect from drag extents
+                                        val x1 = minOf(startPos.x, currentPos.x) / size.width.toFloat()
+                                        val y1 = minOf(startPos.y, currentPos.y) / size.height.toFloat()
+                                        val x2 = maxOf(startPos.x, currentPos.x) / size.width.toFloat()
+                                        val y2 = maxOf(startPos.y, currentPos.y) / size.height.toFloat()
+                                        val halfW = (x2 - x1) / 2f
+                                        val halfH = (y2 - y1) / 2f
+                                        if (halfW >= TargetRect.MIN_HALF && halfH >= TargetRect.MIN_HALF
+                                            && targetRects.size < TargetRect.MAX_RECTS) {
+                                            val newRect = TargetRect(
+                                                cx = x1 + halfW,
+                                                cy = y1 + halfH,
+                                                halfW = halfW,
+                                                halfH = halfH,
+                                            )
+                                            targetRects.add(newRect)
+                                            selectedRectIdx = targetRects.size - 1
+                                            persistRects()
+                                        }
+                                    }
                                 }
                             }
                         },
                 ) {
-                    // Layer 1: Camera (TextureView via COMPATIBLE — renders in View layer)
+                    // Layer 1: Camera (TextureView via COMPATIBLE)
                     AndroidView(
                         factory = { ctx ->
                             PreviewView(ctx).also { pv ->
-                                // COMPATIBLE = TextureView: renders in normal View/Compose layer.
-                                // Compose composables in this Box draw ABOVE the TextureView.
-                                // FILL_CENTER (default) overflow is clipped by clipToBounds().
                                 pv.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                 cameraXController.bind(lifecycleOwner, pv.surfaceProvider)
                             }
@@ -302,20 +410,32 @@ private fun AirframeScreen(settings: SettingsStore) {
                         modifier = Modifier.fillMaxSize(),
                     )
 
-                    // Layer 2: Zone rect + live dot on Canvas (above TextureView)
+                    // Layer 2: Target rects + live drag preview + live dot (Canvas)
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        targetZone?.let { z ->
-                            val cx = z.cx * size.width
-                            val cy = z.cy * size.height
-                            val w = 2 * TargetZone.HALF_SIZE * size.width
-                            val h = 2 * TargetZone.HALF_SIZE * size.height
+                        // Drawn rects with numbers rendered in the BoxWithConstraints layer below.
+                        targetRects.forEachIndexed { idx, rect ->
+                            val isSelected = idx == selectedRectIdx
                             drawRect(
-                                color = Color(0xFF2EA043),
-                                topLeft = Offset(cx - w / 2f, cy - h / 2f),
-                                size = Size(w, h),
-                                style = Stroke(width = 3f),
+                                color = if (isSelected) Color(0xFF58A6FF) else AccentGreen,
+                                topLeft = Offset(rect.left() * size.width, rect.top() * size.height),
+                                size = Size(rect.halfW * 2 * size.width, rect.halfH * 2 * size.height),
+                                style = Stroke(width = if (isSelected) 4f else 3f),
                             )
                         }
+
+                        // Live drag preview
+                        liveDragStart?.let { s ->
+                            liveDragEnd?.let { e ->
+                                drawRect(
+                                    color = Color(0x88FFFFFF),
+                                    topLeft = Offset(minOf(s.x, e.x), minOf(s.y, e.y)),
+                                    size = Size(abs(e.x - s.x), abs(e.y - s.y)),
+                                    style = Stroke(width = 2f),
+                                )
+                            }
+                        }
+
+                        // Live dot
                         liveDot?.let { d ->
                             drawCircle(
                                 color = if (d.isShot) Color(0xFFDA3633) else Color(0xFFD29922),
@@ -328,13 +448,29 @@ private fun AirframeScreen(settings: SettingsStore) {
                         }
                     }
 
-                    // Layer 3: Numbered hit markers as Compose composables (B1).
-                    // These are always above the TextureView in z-order; no Canvas drawing
-                    // needed. hitList is derivedStateOf so a new reference arrives on each
-                    // addition — BoxWithConstraints recomposes and places updated markers.
+                    // Layer 3: Rect numbers + hit markers as Compose composables (above TextureView)
                     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                        val panelW = maxWidth.value   // dp
-                        val panelH = maxHeight.value  // dp
+                        val panelW = maxWidth.value
+                        val panelH = maxHeight.value
+
+                        // Rect number labels (top-left corner of each rect, above the border)
+                        targetRects.forEachIndexed { idx, rect ->
+                            Box(
+                                modifier = Modifier.offset(
+                                    x = (rect.left() * panelW + 2f).dp,
+                                    y = (rect.top() * panelH - 18f).coerceAtLeast(0f).dp,
+                                ),
+                            ) {
+                                Text(
+                                    text = "${idx + 1}",
+                                    color = if (idx == selectedRectIdx) Color(0xFF58A6FF) else AccentGreen,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+
+                        // Hit markers
                         hitList.forEach { hit ->
                             Box(
                                 modifier = Modifier
@@ -368,16 +504,14 @@ private fun AirframeScreen(settings: SettingsStore) {
             }
 
             Spacer(Modifier.height(4.dp))
-            DetectorDiagOverlay(liveDot)
+            DetectorDiagOverlay(liveDot, cameraXController.aeRegionsSupported, meterToTargetEnabled)
             Spacer(Modifier.height(8.dp))
 
             // ── Status line ──────────────────────────────────────────────────
             Text(statusText, color = Muted, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(4.dp))
 
-            // ── Large last-split display (B2) ────────────────────────────────
-            // Shows time-from-GO for shot #1; inter-shot split for later shots.
-            // Blank when no shots yet. Updates live as each shot registers.
+            // ── Large last-split display ─────────────────────────────────────
             if (shots.isNotEmpty()) {
                 val last = shots.last()
                 val splitLabel = if (last.number == 1)
@@ -399,7 +533,7 @@ private fun AirframeScreen(settings: SettingsStore) {
                 Spacer(Modifier.height(4.dp))
             }
 
-            // ── Running shot list (shot #, elapsed, split) ───────────────────
+            // ── Running shot list ─────────────────────────────────────────────
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(shots) { shot -> ShotRow(shot) }
             }
@@ -417,7 +551,6 @@ private fun AirframeScreen(settings: SettingsStore) {
 
                 Button(
                     onClick = {
-                        // Mirrors ShotTimerActivity: synthesise an isShot Detection manually.
                         detector.onDetection?.invoke(
                             Detection(
                                 peakCellX    = 0, peakCellY = 0,
@@ -446,14 +579,12 @@ private fun AirframeScreen(settings: SettingsStore) {
     }
 
     // ── Panel settings sheet ──────────────────────────────────────────────────
-    // Par-time field moved here to avoid camera-preview bleed-through (B3).
     if (panelOpen) {
         ModalBottomSheet(onDismissRequest = { panelOpen = false }, sheetState = sheetState) {
             Column(modifier = Modifier.padding(24.dp)) {
                 Text("Session Panel", style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(16.dp))
 
-                // Par time (moved from main layout — B3 overlap fix)
                 OutlinedTextField(
                     value = parSecondsText,
                     onValueChange = { parSecondsText = it },
@@ -476,13 +607,9 @@ private fun AirframeScreen(settings: SettingsStore) {
                             settings.lockedExposureEnabled = it
                         },
                     )
-                    Column {
-                        Text("Locked Exposure (Feature 22)")
-                    }
+                    Text("Locked Exposure (Feature 22)")
                 }
 
-                // D10 — target-region auto-meter (CC-SIRT-EXPOSURE-CONTROL-001).
-                // Only meaningful when Locked Exposure is on (metering needs AE off).
                 Spacer(Modifier.height(12.dp))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -505,6 +632,34 @@ private fun AirframeScreen(settings: SettingsStore) {
                         )
                     }
                 }
+
+                // B3.5 — Meter to target toggle
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Switch(
+                        checked = meterToTargetEnabled,
+                        onCheckedChange = {
+                            meterToTargetEnabled = it
+                            settings.meterToTargetEnabled = it
+                        },
+                    )
+                    Column {
+                        Text("Meter to target (B3.5)")
+                        Text(
+                            when (cameraXController.aeRegionsSupported) {
+                                false -> "AE regions not supported on this phone — using D10 fallback"
+                                true  -> "Camera AE regions active on drawn rect"
+                                null  -> "Camera not yet bound"
+                            },
+                            color = Muted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+
                 Spacer(Modifier.height(24.dp))
                 TextButton(onClick = { panelOpen = false }) { Text("Close") }
             }
@@ -513,26 +668,18 @@ private fun AirframeScreen(settings: SettingsStore) {
 }
 
 /**
- * Per-frame detection diagnostic bar (CC-SIRT-F22-VISIBILITY-001 §B3).
+ * Per-frame detection diagnostic bar.
  *
- * Read-only display of [Detection] pipeline state — no new detection logic.
- * Gates shown:
- *  - V (brightness): peakScore ≥ [CameraLaserDetector.SCORE_THRESHOLD]
- *  - H (hue/color): [Detection.passColor] (Cb/Cr green gate)
- *  - CMPCT (compactness): [Detection.passNeighbor] (4-connected neighbor gate)
- *  - SHOT: 600 ms flash on [Detection.isShot]
- *
- * Works with both [com.sirtverse.detectioncore.MockLaserDetector] (score=100 on shot,
- * 0 otherwise) and the real [CameraLaserDetector] (per-frame sub-threshold scores visible).
- * When the real detector is wired in, this overlay shows actual ambient-light behavior
- * Mike can use to verify the locked-exposure effect (Feature 22) is working.
+ * B3.5 addition: shows AE metering region status (AE● = active, AE∅ = unsupported/off).
  */
 @Composable
-private fun DetectorDiagOverlay(liveDot: Detection?) {
+private fun DetectorDiagOverlay(
+    liveDot: Detection?,
+    aeRegionsSupported: Boolean?,
+    meterToTargetEnabled: Boolean,
+) {
     val threshold = CameraLaserDetector.SCORE_THRESHOLD
 
-    // SHOT flash: fires once per shot (unique timestampNs), clears after 600 ms.
-    // When isShot=false, shotTs stays 0L across all idle frames — effect does not re-fire.
     val shotTs = liveDot?.takeIf { it.isShot }?.timestampNs ?: 0L
     var shotFlash by remember { mutableStateOf(false) }
     LaunchedEffect(shotTs) {
@@ -546,7 +693,7 @@ private fun DetectorDiagOverlay(liveDot: Detection?) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xCC0A0F14))   // semi-transparent near-black
+            .background(Color(0xCC0A0F14))
             .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
         Row(
@@ -565,8 +712,6 @@ private fun DetectorDiagOverlay(liveDot: Detection?) {
                 DiagGate("V", passV)
                 DiagGate("H", d.passColor)
                 DiagGate("CMPCT", d.passNeighbor)
-                // D10 — ROI luma + commanded exposure (nonzero only while auto-meter runs).
-                // Watch luma settle toward ~150 as the paper stops blowing out (Feature 22).
                 if (d.roiLuma > 0f) {
                     val onTarget = kotlin.math.abs(d.roiLuma - 150f) <= 15f
                     Text(
@@ -575,6 +720,23 @@ private fun DetectorDiagOverlay(liveDot: Detection?) {
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
                         color = if (onTarget) AccentGreen else Amber,
+                    )
+                }
+                // B3.5 — AE region status indicator
+                if (meterToTargetEnabled) {
+                    Text(
+                        text = when (aeRegionsSupported) {
+                            true  -> "AE●"
+                            false -> "AE∅"
+                            null  -> "AE?"
+                        },
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = when (aeRegionsSupported) {
+                            true  -> AccentGreen
+                            false -> Amber
+                            null  -> Muted
+                        },
                     )
                 }
                 if (shotFlash) {
@@ -597,7 +759,6 @@ private fun DetectorDiagOverlay(liveDot: Detection?) {
     }
 }
 
-/** Single gate indicator: name + ✓ (green) or ✗ (amber). */
 @Composable
 private fun DiagGate(name: String, pass: Boolean) {
     Text(
