@@ -156,6 +156,14 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_METER_TO_TARGET, true)
         set(v) = prefs.edit().putBoolean(KEY_METER_TO_TARGET, v).apply()
 
+    // ── CC-SIRT-TRUTH-MODE-001 B4 — Lighting label ─────────────────────────────────────────
+    // Persisted so the lighting chip stays set across sessions. Chip lives in the Airframe panel.
+    // Values: "DIM" | "ROOM" | "BRIGHT" (matches the labels used in truth_report.py verdict table).
+
+    var lightingLabel: String
+        get() = prefs.getString(KEY_LIGHTING_LABEL, "ROOM") ?: "ROOM"
+        set(v) = prefs.edit().putString(KEY_LIGHTING_LABEL, v).apply()
+
     /** Random start delay in the configured [min,max] window. */
     fun randomStartDelayMs(): Long {
         val lo = startDelayMinMs
@@ -189,5 +197,7 @@ class SettingsStore(context: Context) {
         // W1a r2 (CC-SIRT-TARGET-REGION-001 r2 addendum)
         const val KEY_TARGET_RECTS_JSON    = "target_rects_json"
         const val KEY_METER_TO_TARGET      = "meter_to_target_enabled"
+        // CC-SIRT-TRUTH-MODE-001 B4
+        const val KEY_LIGHTING_LABEL       = "lighting_label"
     }
 }

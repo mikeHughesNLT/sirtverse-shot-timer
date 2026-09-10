@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -71,6 +72,7 @@ import com.sirtverse.shottimer.storage.SettingsStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.sqrt
 import kotlin.math.abs
 
@@ -109,6 +111,13 @@ fun AirframeApp(settings: SettingsStore) {
  * - Rects persisted via [SettingsStore.targetRectsJson].
  * - [PreviewSpaceMapper] is the single coordinate-space authority.
  * - B3.5: Camera2 AE metering region set to the selected rect when [meterToTargetEnabled].
+ *
+ * CC-SIRT-TRUTH-MODE-001 (P2):
+ * - B1: zone-only gating — isShot events outside all rects are dropped (ignored tally +1).
+ * - B1: 1 s start-ignore — first 1000 ms after GO are not counted.
+ * - B2: FrameRing — every analysis frame (JPEG q80 + FrameFeatures) buffered for 2 s.
+ * - B3: TruthWriter — events.jsonl per session; MISSED / PHANTOM dump buttons.
+ * - B4: Lighting chip DIM / ROOM / BRIGHT in the panel, persisted.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -150,6 +159,24 @@ private fun AirframeScreen(settings: SettingsStore) {
     var autoMeterEnabled by remember { mutableStateOf(settings.exposureAutoMeterEnabled) }
     var panelOpen by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
+
+    // ── CC-SIRT-TRUTH-MODE-001 state ─────────────────────────────────────────
+    // B1 — zone-only gating + start-ignore
+    var ignoredCount by remember { mutableStateOf(0) }
+    var startIgnoreUntilMs by remember { mutableStateOf(0L) }
+    // B4 — lighting chip (DIM / ROOM / BRIGHT), persisted
+    var lightingLabel by remember { mutableStateOf(settings.lightingLabel) }
+    // B3 — TRUTH mode toggle (default ON for this sprint; controls MISSED/PHANTOM visibility)
+    var truthModeEnabled by remember { mutableStateOf(true) }
+    // B3 — dump feedback shown in overlay
+    var dumpMessage by remember { mutableStateOf("") }
+    // B2 — ring buffer + raw JPEG pipe
+    val frameRing = remember { FrameRing(capacityFrames = 60) }
+    val latestRawJpeg = remember { AtomicReference<ByteArray>(ByteArray(0)) }
+    // B3 — TruthWriter (created once; close() called in DisposableEffect onDispose)
+    val truthWriter = remember(context) {
+        TruthWriter(context, frameRing) { msg -> dumpMessage = msg }
+    }
 
     // Camera permission
     var hasCameraPermission by remember {
@@ -209,17 +236,96 @@ private fun AirframeScreen(settings: SettingsStore) {
         runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 100).startTone(tone, durationMs) }
     }
 
+    // ── Detection seam (CC-SIRT-TRUTH-MODE-001 B1+B2+B3) ─────────────────────
     DisposableEffect(Unit) {
+        // B2 — feed JPEG pipe from analysis thread
+        detector.onRawFrame = { jpeg, _ -> latestRawJpeg.set(jpeg) }
+
         detector.onDetection = { d ->
             liveDot = d
+            val nowMs = SystemClock.elapsedRealtime()
+            val jpeg = latestRawJpeg.get()
+
+            // B2 — build FrameFeatures and push to ring for EVERY frame
+            val aboveThreshold = d.peakScore >= CameraLaserDetector.SCORE_THRESHOLD
+            // Zone + start-ignore verdict (only meaningful for isShot; defaults for non-shot frames)
+            val inStartIgnore = d.isShot && nowMs < startIgnoreUntilMs
+            val zoneRectIdx = if (d.isShot && !inStartIgnore)
+                targetRects.indexOfFirst { it.contains(d.normX.toFloat(), d.normY.toFloat()) }
+            else -1
+            val counted = d.isShot && !inStartIgnore && zoneRectIdx >= 0
+            val reason = when {
+                !d.isShot      -> ""
+                inStartIgnore  -> "START_IGNORE"
+                zoneRectIdx < 0 -> "OUT_OF_ZONE"
+                else           -> ""
+            }
+
+            val features = FrameFeatures(
+                tsMs           = nowMs,
+                score          = d.peakScore,
+                yDelta         = d.yDelta,
+                chromaDelta    = d.chromaDelta,
+                normX          = d.normX,
+                normY          = d.normY,
+                isShot         = d.isShot,
+                aboveThreshold = aboveThreshold,
+                passNeighbor   = d.passNeighbor,
+                passColor      = d.passColor,
+                // Detector threshold constants (read-only, no control-flow change)
+                scoreThreshold = CameraLaserDetector.SCORE_THRESHOLD,
+                neighborFactor = CameraLaserDetector.NEIGHBOR_FACTOR,
+                cbMax          = CameraLaserDetector.CB_MAX,
+                crMax          = CameraLaserDetector.CR_MAX,
+                chromaWeight   = CameraLaserDetector.CHROMA_WEIGHT,
+                emaAlpha       = CameraLaserDetector.EMA_ALPHA,
+                rectIdx        = zoneRectIdx,
+                counted        = counted,
+                reason         = reason,
+                iso            = d.iso,
+                shutterNs      = d.shutterNs,
+                targetLuma     = d.roiLuma,
+                exposureLocked = lockedExposureEnabled,
+                lightingLabel  = lightingLabel,
+            )
+            frameRing.push(jpeg, features)
+
+            // B1 — zone-only gating: handle isShot events
             if (d.isShot) {
-                engine.recordHit()?.let { shot ->
-                    shots.add(shot)
-                    hitMarkers.add(HitMarker(shot.number, d.normX.toFloat(), d.normY.toFloat()))
+                if (!counted) {
+                    // B1 — ignored: update tally
+                    ignoredCount++
+                }
+
+                // B3 — log every isShot event to events.jsonl
+                val gateStr = "V${if (aboveThreshold) "✓" else "✗"} " +
+                    "H${if (d.passColor) "✓" else "✗"} " +
+                    "CMPCT${if (d.passNeighbor) "✓" else "✗"}"
+                truthWriter.logEvent(
+                    tsMs    = nowMs,
+                    nx      = d.normX,
+                    ny      = d.normY,
+                    rectIdx = zoneRectIdx,
+                    counted = counted,
+                    reason  = reason,
+                    score   = d.peakScore,
+                    gates   = gateStr,
+                    lighting = lightingLabel,
+                )
+
+                // B1 — only count as a real hit if it passed all gates
+                if (counted) {
+                    engine.recordHit()?.let { shot ->
+                        shots.add(shot)
+                        hitMarkers.add(HitMarker(shot.number, d.normX.toFloat(), d.normY.toFloat()))
+                    }
                 }
             }
         }
-        onDispose { detector.stop() }
+        onDispose {
+            detector.stop()
+            truthWriter.close()
+        }
     }
 
     // Par-time watchdog
@@ -235,6 +341,14 @@ private fun AirframeScreen(settings: SettingsStore) {
         }
     }
 
+    // Auto-clear dump message after 3 s
+    LaunchedEffect(dumpMessage) {
+        if (dumpMessage.isNotEmpty()) {
+            delay(3000)
+            dumpMessage = ""
+        }
+    }
+
     fun beginCountdown() {
         engine.reset()
         engine.beginCountdown()
@@ -243,10 +357,14 @@ private fun AirframeScreen(settings: SettingsStore) {
         hitMarkers.clear()
         liveDot = null
         parFiredThisRun = false
+        ignoredCount = 0        // B1 — reset ignored tally for new session
+        startIgnoreUntilMs = 0L // will be set after GO
         statusText = "Get ready…"
         scope.launch {
             delay(settings.randomStartDelayMs())
             engine.go()
+            // B1 — 1 s start-ignore: reject detections for the first 1000 ms after GO
+            startIgnoreUntilMs = SystemClock.elapsedRealtime() + 1000L
             sessionState = engine.state
             detector.start()
             beep(ToneGenerator.TONE_CDMA_HIGH_L, 200)
@@ -259,6 +377,24 @@ private fun AirframeScreen(settings: SettingsStore) {
         engine.end()
         sessionState = engine.state
         statusText = "Session ended — ${shots.size} shot(s)"
+    }
+
+    // Helper: build a DumpMeta from current app state
+    fun makeDumpMeta(): TruthWriter.DumpMeta {
+        val d = liveDot
+        return TruthWriter.DumpMeta(
+            tsMs            = SystemClock.elapsedRealtime(),
+            rects           = targetRects.toList(),
+            iso             = d?.iso ?: 0,
+            shutterNs       = d?.shutterNs ?: 0L,
+            targetLuma      = d?.roiLuma ?: 0f,
+            exposureLocked  = lockedExposureEnabled,
+            lighting        = lightingLabel,
+            appVersionName  = runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+            }.getOrDefault("?"),
+            headHash        = "d47cf0c",  // HEAD at v0.3-truth install; updated per commit
+        )
     }
 
     Scaffold(
@@ -470,14 +606,14 @@ private fun AirframeScreen(settings: SettingsStore) {
                             }
                         }
 
-                        // Hit markers
+                        // Hit markers — small 10 dp dots; number as tiny superscript
                         hitList.forEach { hit ->
                             Box(
                                 modifier = Modifier
-                                    .size(28.dp)
+                                    .size(10.dp)
                                     .offset(
-                                        x = (hit.normX * panelW - 14f).dp,
-                                        y = (hit.normY * panelH - 14f).dp,
+                                        x = (hit.normX * panelW - 5f).dp,
+                                        y = (hit.normY * panelH - 5f).dp,
                                     )
                                     .background(Color(0xFFDA3633), CircleShape),
                                 contentAlignment = Alignment.Center,
@@ -485,7 +621,7 @@ private fun AirframeScreen(settings: SettingsStore) {
                                 Text(
                                     text = "${hit.number}",
                                     color = Color.White,
-                                    fontSize = 11.sp,
+                                    fontSize = 6.sp,
                                     fontWeight = FontWeight.Bold,
                                 )
                             }
@@ -504,7 +640,15 @@ private fun AirframeScreen(settings: SettingsStore) {
             }
 
             Spacer(Modifier.height(4.dp))
-            DetectorDiagOverlay(liveDot, cameraXController.aeRegionsSupported, meterToTargetEnabled)
+            // B1 — pass ignoredCount to overlay; B4 — pass lightingLabel
+            DetectorDiagOverlay(
+                liveDot            = liveDot,
+                aeRegionsSupported = cameraXController.aeRegionsSupported,
+                meterToTargetEnabled = meterToTargetEnabled,
+                ignoredCount       = ignoredCount,
+                lightingLabel      = lightingLabel,
+                dumpMessage        = dumpMessage,
+            )
             Spacer(Modifier.height(8.dp))
 
             // ── Status line ──────────────────────────────────────────────────
@@ -538,6 +682,7 @@ private fun AirframeScreen(settings: SettingsStore) {
                 items(shots) { shot -> ShotRow(shot) }
             }
 
+            // ── Control buttons ───────────────────────────────────────────────
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
@@ -574,6 +719,31 @@ private fun AirframeScreen(settings: SettingsStore) {
                     colors = ButtonDefaults.buttonColors(containerColor = DangerRed),
                     modifier = Modifier.weight(1f),
                 ) { Text("STOP") }
+            }
+
+            // B3 — MISSED / PHANTOM thumb buttons (visible only when RUNNING + TRUTH mode ON)
+            if (truthModeEnabled && sessionState == ShotTimerEngine.State.RUNNING) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Button(
+                        onClick = { truthWriter.dumpMissed(makeDumpMeta()) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Amber),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("MISSED", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { truthWriter.dumpPhantom(makeDumpMeta()) },
+                        colors = ButtonDefaults.buttonColors(containerColor = DangerRed),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("PHANTOM", fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }
@@ -660,6 +830,48 @@ private fun AirframeScreen(settings: SettingsStore) {
                     }
                 }
 
+                // CC-SIRT-TRUTH-MODE-001 B3 — TRUTH mode toggle
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Switch(
+                        checked = truthModeEnabled,
+                        onCheckedChange = { truthModeEnabled = it },
+                    )
+                    Column {
+                        Text("TRUTH mode")
+                        Text(
+                            "Shows MISSED/PHANTOM buttons; dumps frames + features on press",
+                            color = Muted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+
+                // CC-SIRT-TRUTH-MODE-001 B4 — Lighting chip
+                Spacer(Modifier.height(16.dp))
+                Text("Lighting", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("DIM", "ROOM", "BRIGHT").forEach { label ->
+                        FilterChip(
+                            selected = lightingLabel == label,
+                            onClick = {
+                                lightingLabel = label
+                                settings.lightingLabel = label
+                            },
+                            label = { Text(label) },
+                        )
+                    }
+                }
+                Text(
+                    "Embedded in every features row and dump meta for the truth_report.py verdict table",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
                 Spacer(Modifier.height(24.dp))
                 TextButton(onClick = { panelOpen = false }) { Text("Close") }
             }
@@ -671,12 +883,18 @@ private fun AirframeScreen(settings: SettingsStore) {
  * Per-frame detection diagnostic bar.
  *
  * B3.5 addition: shows AE metering region status (AE● = active, AE∅ = unsupported/off).
+ * CC-SIRT-TRUTH-MODE-001 B1: shows `ignored: N` tally (out-of-zone + start-ignore events).
+ * CC-SIRT-TRUTH-MODE-001 B3: shows dump feedback (`dumped ✓ <name>`) for 3 s.
+ * CC-SIRT-TRUTH-MODE-001 B4: shows current lighting label chip.
  */
 @Composable
 private fun DetectorDiagOverlay(
     liveDot: Detection?,
     aeRegionsSupported: Boolean?,
     meterToTargetEnabled: Boolean,
+    ignoredCount: Int,
+    lightingLabel: String,
+    dumpMessage: String,
 ) {
     val threshold = CameraLaserDetector.SCORE_THRESHOLD
 
@@ -696,63 +914,93 @@ private fun DetectorDiagOverlay(
             .background(Color(0xCC0A0F14))
             .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            val d = liveDot
-            if (d != null) {
-                val passV = d.peakScore >= threshold
-                Text(
-                    text = "score=${"%.1f".format(d.peakScore)}",
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (passV) AccentGreen else Muted,
-                )
-                DiagGate("V", passV)
-                DiagGate("H", d.passColor)
-                DiagGate("CMPCT", d.passNeighbor)
-                if (d.roiLuma > 0f) {
-                    val onTarget = kotlin.math.abs(d.roiLuma - 150f) <= 15f
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                val d = liveDot
+                if (d != null) {
+                    val passV = d.peakScore >= threshold
                     Text(
-                        text = "luma=${"%.0f".format(d.roiLuma)} " +
-                            "${"%.1f".format(d.shutterNs / 1_000_000.0)}ms/ISO${d.iso}",
+                        text = "score=${"%.1f".format(d.peakScore)}",
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (onTarget) AccentGreen else Amber,
+                        color = if (passV) AccentGreen else Muted,
                     )
-                }
-                // B3.5 — AE region status indicator
-                if (meterToTargetEnabled) {
+                    DiagGate("V", passV)
+                    DiagGate("H", d.passColor)
+                    DiagGate("CMPCT", d.passNeighbor)
+                    if (d.roiLuma > 0f) {
+                        val onTarget = kotlin.math.abs(d.roiLuma - 150f) <= 15f
+                        Text(
+                            text = "luma=${"%.0f".format(d.roiLuma)} " +
+                                "${"%.1f".format(d.shutterNs / 1_000_000.0)}ms/ISO${d.iso}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (onTarget) AccentGreen else Amber,
+                        )
+                    }
+                    // B3.5 — AE region status indicator
+                    if (meterToTargetEnabled) {
+                        Text(
+                            text = when (aeRegionsSupported) {
+                                true  -> "AE●"
+                                false -> "AE∅"
+                                null  -> "AE?"
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when (aeRegionsSupported) {
+                                true  -> AccentGreen
+                                false -> Amber
+                                null  -> Muted
+                            },
+                        )
+                    }
+                    if (shotFlash) {
+                        Text(
+                            text = "🎯 SHOT",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = AccentGreen,
+                        )
+                    }
+                } else {
                     Text(
-                        text = when (aeRegionsSupported) {
-                            true  -> "AE●"
-                            false -> "AE∅"
-                            null  -> "AE?"
-                        },
+                        text = "detector idle",
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
-                        color = when (aeRegionsSupported) {
-                            true  -> AccentGreen
-                            false -> Amber
-                            null  -> Muted
-                        },
+                        color = Muted,
                     )
                 }
-                if (shotFlash) {
+
+                // B1 — ignored tally (always visible once non-zero)
+                if (ignoredCount > 0) {
                     Text(
-                        text = "🎯 SHOT",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = AccentGreen,
+                        text = "ignored:$ignoredCount",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Amber,
                     )
                 }
-            } else {
+
+                // B4 — lighting label
                 Text(
-                    text = "detector idle",
+                    text = lightingLabel,
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
                     color = Muted,
+                )
+            }
+
+            // B3 — dump feedback line
+            if (dumpMessage.isNotEmpty()) {
+                Text(
+                    text = "dumped ✓ $dumpMessage",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AccentGreen,
                 )
             }
         }

@@ -1,11 +1,15 @@
 package com.sirtverse.detectioncore
 
 import android.content.Context
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.camera.core.ImageProxy
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
@@ -39,6 +43,19 @@ class CameraLaserDetector(
 ) : LaserDetector {
 
     override var onDetection: ((Detection) -> Unit)? = null
+
+    /**
+     * CC-SIRT-TRUTH-MODE-001 B2 — read-only raw-frame accessor.
+     *
+     * When set, fires on the analysis thread for every processed frame with:
+     *   - a JPEG q80 of the analysis frame at the detector's input resolution
+     *   - the frame's [ImageProxy.imageInfo.timestamp] in nanoseconds
+     *
+     * Setting this does NOT affect any detection logic, thresholds, or control flow.
+     * Close-out receipt: git diff -- detection-core/ shows no changed numeric literal,
+     * no changed control flow.
+     */
+    var onRawFrame: ((ByteArray, Long) -> Unit)? = null
 
     companion object {
         private const val TAG = "CameraLaserDet"
@@ -262,9 +279,63 @@ class CameraLaserDetector(
         try {
             frameCount++
             processFrame(image)
+            // CC-SIRT-TRUTH-MODE-001 B2 — fire raw-frame accessor (read-only; no detection effect)
+            onRawFrame?.let { cb ->
+                try {
+                    cb(imageToJpeg(image), image.imageInfo.timestamp)
+                } catch (_: Exception) { /* best-effort; never block analysis */ }
+            }
         } finally {
             image.close()
         }
+    }
+
+    /**
+     * CC-SIRT-TRUTH-MODE-001 B2 — compress the YUV_420_888 analysis frame to JPEG q80.
+     *
+     * Packs to NV21 (the format Android's [YuvImage] expects) respecting per-plane row/pixel
+     * strides (YUV_420_888 may be I420 or NV12/NV21 depending on the driver). The image is
+     * NOT closed here — that remains the caller's responsibility via [analyzeFrame]'s finally.
+     */
+    private fun imageToJpeg(image: ImageProxy): ByteArray {
+        val w = image.width
+        val h = image.height
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        val yRowStride    = yPlane.rowStride
+        val uvRowStride   = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+
+        val nv21 = ByteArray(w * h + (w / 2) * (h / 2) * 2)
+        // Y plane — copy row by row to strip any padding
+        for (row in 0 until h) {
+            val pos = row * yRowStride
+            if (pos + w <= yBuf.limit()) {
+                yBuf.position(pos)
+                yBuf.get(nv21, row * w, w)
+            }
+        }
+        // VU interleaved (NV21) — Cb (U) and Cr (V) at half resolution
+        var uvOffset = w * h
+        for (row in 0 until h / 2) {
+            for (col in 0 until w / 2) {
+                val idx = row * uvRowStride + col * uvPixelStride
+                if (idx < vBuf.limit() && idx < uBuf.limit()) {
+                    nv21[uvOffset++] = vBuf.get(idx)  // V first → NV21
+                    nv21[uvOffset++] = uBuf.get(idx)  // U second
+                } else {
+                    uvOffset += 2
+                }
+            }
+        }
+        val yuvImg = YuvImage(nv21, ImageFormat.NV21, w, h, null)
+        val out = ByteArrayOutputStream()
+        yuvImg.compressToJpeg(Rect(0, 0, w, h), 80, out)
+        return out.toByteArray()
     }
 
     private fun processFrame(image: ImageProxy) {
