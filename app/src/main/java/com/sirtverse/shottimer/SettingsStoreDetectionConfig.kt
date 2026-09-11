@@ -28,6 +28,7 @@ class SettingsStoreDetectionConfig(private val store: SettingsStore) : Detection
     override val neighborFactor:        Float   get() = store.neighborFactor
     override val cbMax:                 Int     get() = store.cbMax
     override val crMax:                 Int     get() = store.crMax
+    override val crMin:                 Int     get() = store.crMin
     override val minAbsentFrames:       Int     get() = store.minAbsentFrames
     override val maxPulseFrames:        Int     get() = store.maxPulseFrames
     // D10 (CC-SIRT-EXPOSURE-CONTROL-001)

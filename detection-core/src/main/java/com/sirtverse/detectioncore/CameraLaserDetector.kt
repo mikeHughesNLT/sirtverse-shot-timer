@@ -69,10 +69,14 @@ class CameraLaserDetector(
         @JvmField var SCORE_THRESHOLD = 16f
 
         // B-4 iteration 2 (2026-07-19 night): "not-red, not-strongly-blue" semantics.
-        // Cb < 150 rejects strong blue; Cr < 127 rejects red.
+        // Cb < 150 rejects strong blue; Cr < 127 rejects red (green laser gate).
         // P0 CAMPAIGN-002: @JvmField var (was const) — runtime-tunable as D6.
+        // D6b dual gate: passColor = (cr < CR_MAX) OR (cr > CR_MIN).  Lets a red laser dot
+        // (cr ≈ 150–200) pass while blocking the white-LED lamp (cr ≈ 127) that falls between.
+        // CR_MIN=255 (default) disables the red path — behavior identical to before.
         @JvmField var CB_MAX = 150
         @JvmField var CR_MAX = 127
+        @JvmField var CR_MIN = 255   // D6b: 255 = red gate disabled; 140 = red laser enabled
 
         // P0 CAMPAIGN-002: @JvmField var (was const) — runtime-tunable as D4.
         @JvmField var EMA_ALPHA = 0.05f
@@ -186,6 +190,7 @@ class CameraLaserDetector(
         NEIGHBOR_FACTOR = config.neighborFactor
         CB_MAX          = config.cbMax
         CR_MAX          = config.crMax
+        CR_MIN          = config.crMin
         benchModeActive = config.benchModeEnabled
         // D8+D9 applied via PulseStateMachine constructor — camera-free spec is in PSM.
         pulse = PulseStateMachine(config.minAbsentFrames, config.maxPulseFrames)
@@ -232,7 +237,7 @@ class CameraLaserDetector(
         Log.i(TAG, "start session=$sessionId " +
                 "labMode=${config.labModeEnabled} benchMode=$benchModeActive " +
                 "score=$SCORE_THRESHOLD chroma=$CHROMA_WEIGHT ema=$EMA_ALPHA " +
-                "neighbor=$NEIGHBOR_FACTOR cbMax=$CB_MAX crMax=$CR_MAX " +
+                "neighbor=$NEIGHBOR_FACTOR cbMax=$CB_MAX crMax=$CR_MAX crMin=$CR_MIN " +
                 "cooldown=${config.cooldownMs}ms " +
                 "absent=${config.minAbsentFrames} maxPulse=${config.maxPulseFrames} " +
                 "lockedExposure=${config.lockedExposureEnabled} " +
@@ -603,9 +608,16 @@ class CameraLaserDetector(
     }
 
     /**
-     * Green color gate using Cb/Cr planes (YUV_420_888).
+     * Laser color gate using Cb/Cr planes (YUV_420_888).
      *
-     * Gate: Cb < [CB_MAX] and Cr < [CR_MAX].
+     * Dual-path gate: passColor = Cb < CB_MAX  AND  (Cr < CR_MAX  OR  Cr > CR_MIN)
+     *
+     * Green laser (532 nm): Cr ≈ 20–80   → passes Cr < CR_MAX (127).
+     * Red laser  (650 nm): Cr ≈ 150–200  → passes Cr > CR_MIN (140 when enabled; 255 = off).
+     * White LED lamp:       Cr ≈ 127–128  → falls between gates → blocked.
+     *
+     * CR_MIN=255 (default) makes the red path unreachable → identical to the old single gate.
+     *
      * UV planes are half-resolution; pixelStride may be 1 (I420) or 2 (NV12/NV21).
      */
     private fun checkGreen(image: ImageProxy, peakIdx: Int, gW: Int): Boolean {
@@ -624,12 +636,22 @@ class CameraLaserDetector(
 
         val cb = uvPlane1.buffer.get(uvBufIdx).toInt() and 0xFF
         val cr = uvPlane2.buffer.get(uvBufIdx).toInt() and 0xFF
-        val isGreen = cb < CB_MAX && cr < CR_MAX
+
+        // Dual gate: green path (cr < crMax) OR red path (cr > crMin, disabled when crMin=255)
+        val passGreen = cb < CB_MAX && cr < CR_MAX
+        val passRed   = cb < CB_MAX && cr > CR_MIN
+        val passColor = passGreen || passRed
+        val colorLabel = when {
+            passGreen -> "GREEN"
+            passRed   -> "RED"
+            else      -> "BLOCKED"
+        }
 
         if (frameCount % DIAG_EVERY_N_FRAMES == 0L) {
-            Log.d(TAG, "DIAG_UV cb=$cb cr=$cr isGreen=$isGreen (gate cb<$CB_MAX cr<$CR_MAX)")
+            Log.d(TAG, "DIAG_UV cb=$cb cr=$cr pass=$colorLabel " +
+                    "(gate cb<$CB_MAX cr<$CR_MAX || cr>$CR_MIN)")
         }
-        return isGreen
+        return passColor
     }
 
     // ── JSONL event log ───────────────────────────────────────────────────────

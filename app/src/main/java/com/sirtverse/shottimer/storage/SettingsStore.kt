@@ -109,6 +109,16 @@ class SettingsStore(context: Context) {
         get() = prefs.getInt(KEY_CR_MAX, CameraLaserDetector.CR_MAX)
         set(v) = prefs.edit().putInt(KEY_CR_MAX, v).apply()
 
+    /**
+     * D6b — red laser color gate: Cr must be ABOVE this value (second pass-path).
+     * Default 255 disables the red gate. Set to 140 to enable red-laser detection:
+     *   red laser cr ≈ 150–200 → passes (cr > 140)
+     *   white LED lamp cr ≈ 127  → blocked (127 < 140)
+     */
+    var crMin: Int
+        get() = prefs.getInt(KEY_CR_MIN, CameraLaserDetector.CR_MIN)
+        set(v) = prefs.edit().putInt(KEY_CR_MIN, v).apply()
+
     /** D8 — frames candidate must be absent before a new pulse can fire. */
     var minAbsentFrames: Int
         get() = prefs.getInt(KEY_MIN_ABSENT_FRAMES, PulseStateMachine.MIN_ABSENT_FRAMES)
@@ -189,6 +199,7 @@ class SettingsStore(context: Context) {
         const val KEY_NEIGHBOR_FACTOR    = "neighbor_factor"
         const val KEY_CB_MAX             = "cb_max"
         const val KEY_CR_MAX             = "cr_max"
+        const val KEY_CR_MIN             = "cr_min"
         const val KEY_MIN_ABSENT_FRAMES  = "min_absent_frames"
         const val KEY_MAX_PULSE_FRAMES   = "max_pulse_frames"
         // D10 (CC-SIRT-EXPOSURE-CONTROL-001)

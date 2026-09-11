@@ -61,6 +61,14 @@ interface DetectionConfig {
     /** D6 — green color gate: Cr must be below this value. */
     val crMax: Int
 
+    /**
+     * D6b — red laser color gate: Cr must be ABOVE this value for a second pass-path.
+     * Dual gate: passColor = (cr < crMax) OR (cr > crMin).  This lets a red laser dot
+     * (cr ≈ 150–200) pass while still blocking the white-LED lamp (cr ≈ 127–128) which
+     * falls between the two gates.  Set to 255 (default) to disable — red gate never fires.
+     */
+    val crMin: Int
+
     /** D8 — frames a candidate must be absent before a new pulse can fire. */
     val minAbsentFrames: Int
 
