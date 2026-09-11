@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -166,6 +167,9 @@ private fun AirframeScreen(settings: SettingsStore) {
     var startIgnoreUntilMs by remember { mutableStateOf(0L) }
     // B4 — lighting chip (DIM / ROOM / BRIGHT), persisted
     var lightingLabel by remember { mutableStateOf(settings.lightingLabel) }
+    // D3 — score threshold and cooldown — Panel sliders (runtime-tunable without rebuild)
+    var scoreThresholdState by remember { mutableStateOf(settings.scoreThreshold) }
+    var cooldownMsState by remember { mutableStateOf(settings.cooldownMs.toFloat()) }
     // B3 — TRUTH mode toggle (default ON for this sprint; controls MISSED/PHANTOM visibility)
     var truthModeEnabled by remember { mutableStateOf(true) }
     // B3 — dump feedback shown in overlay
@@ -870,6 +874,38 @@ private fun AirframeScreen(settings: SettingsStore) {
                     "Embedded in every features row and dump meta for the truth_report.py verdict table",
                     color = Muted,
                     style = MaterialTheme.typography.bodySmall,
+                )
+
+                // ── D3 score threshold + cooldown sliders ────────────────────────
+                Spacer(Modifier.height(16.dp))
+                Text("Detection Dials", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    "D3 score threshold: ${String.format("%.1f", scoreThresholdState)}  " +
+                    "(default 16 — lower = more sensitive)",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Slider(
+                    value = scoreThresholdState,
+                    onValueChange = { scoreThresholdState = it },
+                    onValueChangeFinished = { settings.scoreThreshold = scoreThresholdState },
+                    valueRange = 6f..24f,
+                    steps = 35,
+                )
+
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Cooldown: ${cooldownMsState.toInt()} ms  " +
+                    "(min gap between shots — lower = faster splits)",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Slider(
+                    value = cooldownMsState,
+                    onValueChange = { cooldownMsState = it },
+                    onValueChangeFinished = { settings.cooldownMs = cooldownMsState.toInt() },
+                    valueRange = 50f..1000f,
+                    steps = 18,
                 )
 
                 Spacer(Modifier.height(24.dp))
