@@ -169,6 +169,21 @@ class CameraLaserDetector(
     private var sessionId = ""
     private var logWriter: PrintWriter? = null
 
+    // ── CC-SIRT-NOVELTY-KOTLIN-RED-001-r3 (T3) — novelty seam state ───────────
+    // Resolved once at start() from DetectorMode (default LEGACY — a fresh
+    // install is behaviourally identical to pre-port). The scorer runs ONLY
+    // for red-chroma candidates in novelty mode; green never routes to it
+    // (DetectorMode.colorRoute, unit-tested).
+    private var detectorMode = DetectorMode.LEGACY
+    private var noveltyScorer: NoveltyScorer? = null
+    // Rolling gray reference for the live seam (the Python live default is a
+    // rolling background — MOG2 there; EMA here, updated only on frames the
+    // scorer did NOT fire on, mirroring the incumbent's resumeBackground
+    // pattern). Cold start: first frame becomes the reference -> zero novelty,
+    // never fires (Python MOG2 cold-start semantics, novelty_scorer.py
+    // L281-285).
+    private var noveltyRefGray: ByteArray? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun start() {
@@ -194,6 +209,13 @@ class CameraLaserDetector(
         benchModeActive = config.benchModeEnabled
         // D8+D9 applied via PulseStateMachine constructor — camera-free spec is in PSM.
         pulse = PulseStateMachine(config.minAbsentFrames, config.maxPulseFrames)
+
+        // CC-SIRT-NOVELTY-KOTLIN-RED-001-r3 (T3): resolve the detector mode once
+        // per session; reset the novelty reference so a stale background never
+        // leaks across start() boundaries.
+        detectorMode = DetectorMode.current()
+        noveltyScorer = if (detectorMode == DetectorMode.NOVELTY) NoveltyScorer(color = "red") else null
+        noveltyRefGray = null
 
         active = true
 
@@ -236,6 +258,7 @@ class CameraLaserDetector(
 
         Log.i(TAG, "start session=$sessionId " +
                 "labMode=${config.labModeEnabled} benchMode=$benchModeActive " +
+                "detectorMode=$detectorMode " +
                 "score=$SCORE_THRESHOLD chroma=$CHROMA_WEIGHT ema=$EMA_ALPHA " +
                 "neighbor=$NEIGHBOR_FACTOR cbMax=$CB_MAX crMax=$CR_MAX crMin=$CR_MIN " +
                 "cooldown=${config.cooldownMs}ms " +
@@ -490,7 +513,15 @@ class CameraLaserDetector(
         // ── Step 2: candidate gates (capture results for Detection stream) ─────
         val aboveThreshold = peakScore >= SCORE_THRESHOLD
         val passNeighbor   = aboveThreshold && checkNeighbor(scores, peakIdx, gW, gH)
-        val passColor      = passNeighbor && checkGreen(image, peakIdx, gW)
+        // CC-SIRT-NOVELTY-KOTLIN-RED-001-r3 (T3) seam: in novelty mode, red-chroma
+        // candidates are judged by NoveltyScorer (threshold 0.8025, fitted triple);
+        // every other chroma — green included — falls through to the untouched
+        // legacy gate. In legacy mode colorRoute always returns LEGACY_GATE, so
+        // this when() is behaviourally identical to the pre-port line.
+        val passColor      = passNeighbor && when (colorRouteFor(image, peakIdx, gW)) {
+            DetectorMode.ColorRoute.NOVELTY_RED -> checkNoveltyRed(image)
+            DetectorMode.ColorRoute.LEGACY_GATE -> checkGreen(image, peakIdx, gW)
+        }
         val isCandidate    = passColor
 
         // ── Step 3: pulse state machine ───────────────────────────────────────
@@ -652,6 +683,116 @@ class CameraLaserDetector(
                     "(gate cb<$CB_MAX cr<$CR_MAX || cr>$CR_MIN)")
         }
         return passColor
+    }
+
+    // ── CC-SIRT-NOVELTY-KOTLIN-RED-001-r3 (T3) — novelty seam helpers ─────────
+
+    /**
+     * Peak-chroma read for the seam's routing decision. Uses the same UV
+     * sampling as [checkGreen] but changes NO green-path state or semantics;
+     * the pure decision itself lives in [DetectorMode.colorRoute] (JVM-tested).
+     * Returns LEGACY_GATE whenever the mode is legacy, the scorer is absent,
+     * or the chroma is not D6b-red.
+     */
+    private fun colorRouteFor(image: ImageProxy, peakIdx: Int, gW: Int): DetectorMode.ColorRoute {
+        if (noveltyScorer == null) return DetectorMode.ColorRoute.LEGACY_GATE
+        if (detectorMode != DetectorMode.NOVELTY) return DetectorMode.ColorRoute.LEGACY_GATE
+        val peakGx = peakIdx % gW
+        val peakGy = peakIdx / gW
+        val px = peakGx * STRIDE
+        val py = peakGy * STRIDE
+        val uvPlane1 = image.planes[1]
+        val uvPlane2 = image.planes[2]
+        val uvRowStride = uvPlane1.rowStride
+        val uvPixelStride = uvPlane1.pixelStride
+        val uvBufIdx = (py / 2) * uvRowStride + (px / 2) * uvPixelStride
+        if (uvBufIdx >= uvPlane1.buffer.limit() || uvBufIdx >= uvPlane2.buffer.limit()) {
+            return DetectorMode.ColorRoute.LEGACY_GATE
+        }
+        val cb = uvPlane1.buffer.get(uvBufIdx).toInt() and 0xFF
+        val cr = uvPlane2.buffer.get(uvBufIdx).toInt() and 0xFF
+        return DetectorMode.colorRoute(detectorMode, cb, cr, CB_MAX, CR_MAX, CR_MIN)
+    }
+
+    /**
+     * Novelty-mode red verdict: build gray + RGB planes from the YUV analysis
+     * frame (BT.601 video range, nearest chroma — the live approximation of
+     * the golden path's exact gray/RGB, documented in bench/NOVELTY-KOTLIN-RED-001.md),
+     * score against the rolling EMA reference, and fire at the fitted 0.8025.
+     * The reference updates (EMA) only when the scorer does NOT fire — the
+     * incumbent's resumeBackground pattern — so a steady take-up cursor is
+     * absorbed into the background instead of firing forever.
+     */
+    private fun checkNoveltyRed(image: ImageProxy): Boolean {
+        val scorer = noveltyScorer ?: return false
+        val w = image.width
+        val h = image.height
+        val n = w * h
+
+        val gray = ByteArray(n)
+        val rr = ByteArray(n)
+        val gg = ByteArray(n)
+        val bb = ByteArray(n)
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        val yRowStride = yPlane.rowStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+        val yLimit = yBuf.limit()
+        val uLimit = uBuf.limit()
+        val vLimit = vBuf.limit()
+
+        for (y in 0 until h) {
+            val yRow = y * yRowStride
+            val uvRow = (y / 2) * uvRowStride
+            val outRow = y * w
+            for (x in 0 until w) {
+                val yIdx = yRow + x
+                if (yIdx >= yLimit) continue
+                val yv = yBuf.get(yIdx).toInt() and 0xFF
+                val uvIdx = uvRow + (x / 2) * uvPixelStride
+                var cb = 128
+                var cr = 128
+                if (uvIdx < uLimit && uvIdx < vLimit) {
+                    cb = uBuf.get(uvIdx).toInt() and 0xFF
+                    cr = vBuf.get(uvIdx).toInt() and 0xFF
+                }
+                val dcb = cb - 128
+                val dcr = cr - 128
+                val i = outRow + x
+                gray[i] = yv.toByte()
+                rr[i] = (yv + 1.402f * dcr).toInt().coerceIn(0, 255).toByte()
+                gg[i] = (yv - 0.344136f * dcb - 0.714136f * dcr).toInt().coerceIn(0, 255).toByte()
+                bb[i] = (yv + 1.772f * dcb).toInt().coerceIn(0, 255).toByte()
+            }
+        }
+
+        val ref = noveltyRefGray
+        if (ref == null || ref.size != n) {
+            // Cold start (Python MOG2 warm-up semantics): the frame IS the
+            // reference -> zero novelty, never fires.
+            noveltyRefGray = gray.copyOf()
+            return false
+        }
+        val res = scorer.score(gray, ref, rr, gg, bb, w, h)
+        if (!res.fired) {
+            // EMA absorb (alpha mirrors the incumbent's EMA_ALPHA).
+            for (i in 0 until n) {
+                val cur = ref[i].toInt() and 0xFF
+                val newV = gray[i].toInt() and 0xFF
+                ref[i] = (cur + EMA_ALPHA * (newV - cur)).toInt().coerceIn(0, 255).toByte()
+            }
+        } else {
+            Log.i(TAG, "NOVELTY_RED frame=$frameCount score=${"%.4f".format(res.score)} " +
+                    "f06=${"%.1f".format(res.f06LocalContrast)} f03=${res.f03VPeak} " +
+                    "f09=${"%.1f".format(res.f09Novelty)} cand=${res.nCandidates}")
+        }
+        return res.fired
     }
 
     // ── JSONL event log ───────────────────────────────────────────────────────
