@@ -272,8 +272,10 @@ class NoveltyScorer(
     }
 
     /** Returns doubleArrayOf(dx, dy) with OpenCV's sign convention:
-     *  shift = paddedCenter - weightedCentroid(fftShifted response). */
-    private fun phaseShift(frame: ByteArray, ref: ByteArray, w: Int, h: Int): DoubleArray {
+     *  shift = paddedCenter - weightedCentroid(fftShifted response).
+     *  `internal` (not private) so the T5 microbench can time registration
+     *  separately from feature extraction. */
+    internal fun phaseShift(frame: ByteArray, ref: ByteArray, w: Int, h: Int): DoubleArray {
         val m = optimalDftSize(h)
         val n = optimalDftSize(w)
         val wc = hann(w)
